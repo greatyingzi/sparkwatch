@@ -1,11 +1,7 @@
-This project is MIT licensed (see LICENSE). It also incorporates code and
-thresholds from the MIT-licensed projects listed below; their copyright notices
-follow.
-
 # Third-party notices
 
-SparkWatch is MIT licensed, but it deliberately borrows from people who worked
-this problem out first. What came from where:
+SparkWatch is MIT licensed (see LICENSE), but it deliberately borrows from
+people who worked this problem out first. What came from where:
 
 ## Code incorporated
 

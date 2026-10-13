@@ -223,9 +223,12 @@ nowhere else.
 What it costs to run is real, though: an Apple Developer certificate so builds
 are signed and notarised rather than "right-click, open anyway" (a paid account
 is the only way to do that), and the hardware it is developed against. If you
-want to put money towards that, a support channel will be listed here when it
-exists — right now there isn't one, and this section exists so the position is
-clear rather than implied.
+want to put money towards that, the channel is **[Ko-fi](https://ko-fi.com/yingzi62662)** —
+it passes payments straight to PayPal, holds nothing itself, and takes no cut of
+a tip.
+
+Nothing is unlocked by it: no priority, no extra features, no attribution
+requirement. The build you cloned is the build a supporter gets.
 
 What genuinely helps more than money:
 

@@ -1,0 +1,9 @@
+# Funding options for SparkWatch. GitHub renders a Sponsor button in the sidebar
+# when this file exists on the default branch.
+#
+# Ko-fi passes payments straight to the maintainer's PayPal; nothing is held on
+# Ko-fi's side, and there is no fee on tips.
+ko_fi: yingzi62662
+
+# A domestic channel can be added the same way, for example:
+# custom: ["https://afdian.com/a/<handle>"]

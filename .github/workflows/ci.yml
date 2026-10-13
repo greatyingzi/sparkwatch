@@ -1,0 +1,49 @@
+name: CI
+
+# The release workflow only runs on tags, so without this a broken main branch is
+# discovered at release time. This is the same build and test, on every push.
+#
+# It also builds the app bundle and the DMG without publishing them: packaging
+# breaks (a renamed file, a missing asset) should surface here rather than in a
+# tag run that is already halfway to a release.
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Toolchain
+        run: |
+          if ! swift --version 2>&1 | grep -qE 'Swift version 6'; then
+            XC="$(ls -d /Applications/Xcode_1[6-9]*.app /Applications/Xcode_2[0-9]*.app 2>/dev/null | sort -V | tail -1)"
+            [ -n "$XC" ] && sudo xcode-select -s "$XC"
+          fi
+          swift --version
+          swift --version 2>&1 | grep -qE 'Swift version 6' || {
+            echo "::error::no Swift 6 toolchain on this runner"; exit 1; }
+
+      - name: Build and test
+        run: |
+          set -o pipefail
+          swift build 2>&1 | tail -5
+          swift test 2>&1 | tail -5
+
+      - name: Package (not published)
+        run: |
+          set -o pipefail
+          ./Scripts/build-app.sh 2>&1 | tail -3
+          ./Scripts/make-dmg.sh 2>&1 | tail -3
+          plutil -lint dist/SparkWatch.app/Contents/Info.plist
+          codesign --verify --strict dist/SparkWatch.app
+          # The packaged executable, headless: no GUI session, no network.
+          dist/SparkWatch.app/Contents/MacOS/SparkWatch --print-status --demo-devices 2 | head -5

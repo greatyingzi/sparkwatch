@@ -3,6 +3,8 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 [![Platform: macOS 14+](https://img.shields.io/badge/platform-macOS%2014%2B-lightgrey.svg)](#install)
 [![Swift 6](https://img.shields.io/badge/Swift-6-orange.svg)](#build-from-source)
+[![Release](https://img.shields.io/github/v/release/greatyingzi/sparkwatch)](https://github.com/greatyingzi/sparkwatch/releases/latest)
+[![CI](https://github.com/greatyingzi/sparkwatch/actions/workflows/ci.yml/badge.svg)](https://github.com/greatyingzi/sparkwatch/actions/workflows/ci.yml)
 
 **English** | [中文](README.zh-CN.md)
 
@@ -76,7 +78,30 @@ reconciles the dashboard against independently read values. See
 
 ## Install
 
-### Installer script
+### Download the DMG
+
+Grab **`SparkWatch-0.3.0.dmg`** from
+[Releases](https://github.com/greatyingzi/sparkwatch/releases/latest), open it, and
+drag **SparkWatch** onto the Applications folder next to it.
+
+The app is ad-hoc signed — no Apple Developer ID, because a paid developer account
+is the only way to get one — so a copy that came off the network is quarantined and
+Gatekeeper stops it. It looks like "nothing happens when I double-click". One
+command fixes it:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/SparkWatch.app
+```
+
+The recursive `-r` matters: the quarantine bit is on the inner executable too, so a
+non-recursive removal appears to do nothing. In the GUI: right-click the app →
+**Open** → **Open** again; if macOS only offers "Done", go to
+**System Settings → Privacy & Security** and click **Open Anyway**. The release
+page and a note inside the DMG both spell this out.
+
+Verify the download against the SHA256SUMS file in the same release.
+
+### Installer script (builds from source)
 
 ```bash
 git clone https://github.com/greatyingzi/sparkwatch.git
@@ -103,9 +128,8 @@ dashboard against values read independently over SSH:
 DGX_PW_00=… DGX_PW_01=… swift run sparkwatch-probe -- --seconds 20
 ```
 
-There is no prebuilt release yet: the app is ad-hoc signed, so a downloaded
-bundle would be quarantined by Gatekeeper anyway. Building from source takes
-about a minute.
+Building from source takes about a minute, and needs no dependencies beyond
+the Swift toolchain.
 
 ### What the installer gives you
 

@@ -3,6 +3,8 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 [![Platform: macOS 14+](https://img.shields.io/badge/platform-macOS%2014%2B-lightgrey.svg)](#安装)
 [![Swift 6](https://img.shields.io/badge/Swift-6-orange.svg)](#从源码构建)
+[![Release](https://img.shields.io/github/v/release/greatyingzi/sparkwatch)](https://github.com/greatyingzi/sparkwatch/releases/latest)
+[![CI](https://github.com/greatyingzi/sparkwatch/actions/workflows/ci.yml/badge.svg)](https://github.com/greatyingzi/sparkwatch/actions/workflows/ci.yml)
 
 [English](README.md) | **中文**
 
@@ -55,7 +57,25 @@ token 与能耗账本。见[支持的推理引擎](#支持的推理引擎)。
 
 ## 安装
 
-### 安装脚本
+### 下载 DMG
+
+到 [Releases](https://github.com/greatyingzi/sparkwatch/releases/latest) 下载
+**`SparkWatch-0.3.0.dmg`**，打开后把 **SparkWatch** 拖进右边的 Applications 文件夹。
+
+app 是 ad-hoc 签名（没有 Apple 开发者证书——只有付费开发者账号才能拿到），所以从网络下载的
+副本会带隔离属性、被 Gatekeeper 拦下，表现为"双击没反应"。终端跑一次这条即可放行：
+
+```bash
+xattr -dr com.apple.quarantine /Applications/SparkWatch.app
+```
+
+`-r` 不能省：隔离属性也挂在 app 内部的二进制上，非递归删除会看起来"没生效"。
+图形界面等价做法：右键 app → **打开** → 再点**打开**；若只给"完成"，去
+**系统设置 → 隐私与安全性** 点**仍要打开**。Release 页面与 DMG 里的说明文件都写了这一步。
+
+下载后可用同一个 release 里的 SHA256SUMS 校验。
+
+### 安装脚本（从源码构建）
 
 ```bash
 git clone https://github.com/greatyingzi/sparkwatch.git
@@ -80,8 +100,7 @@ open dist/SparkWatch.app
 DGX_PW_00=… DGX_PW_01=… swift run sparkwatch-probe -- --seconds 20
 ```
 
-目前没有预编译发布版：app 是 ad-hoc 签名的，下载下来的包本来就会被 Gatekeeper 拦掉。
-从源码构建大约一分钟。
+从源码构建大约一分钟，除了 Swift 工具链之外不需要任何依赖。
 
 ### 安装脚本给了你什么
 

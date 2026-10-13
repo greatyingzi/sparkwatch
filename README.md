@@ -4,6 +4,8 @@
 [![Platform: macOS 14+](https://img.shields.io/badge/platform-macOS%2014%2B-lightgrey.svg)](#install)
 [![Swift 6](https://img.shields.io/badge/Swift-6-orange.svg)](#build-from-source)
 
+**English** | [中文](README.zh-CN.md)
+
 A macOS menu-bar monitor for a small cluster of NVIDIA DGX Spark (GB10) boxes:
 what the hardware is doing **and** what the models on it are doing, in one line.
 

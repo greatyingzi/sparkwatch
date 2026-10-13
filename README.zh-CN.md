@@ -57,6 +57,17 @@ token 与能耗账本。见[支持的推理引擎](#支持的推理引擎)。
 
 ## 安装
 
+### Homebrew
+
+```bash
+brew install --cask greatyingzi/tap/sparkwatch
+```
+
+一个 tap 装下我所有的 app，所以只需要添加这一个 tap。`brew upgrade --cask
+sparkwatch` 升级；`brew uninstall --cask --zap sparkwatch` 卸载并清掉设置。
+首次启动仍需下面那一步放行——Homebrew 7 已移除 `--no-quarantine`，并且会把隔离属性
+传给装好的 app，所以 cask 里同样印了这条说明。
+
 ### 下载 DMG
 
 到 [Releases](https://github.com/greatyingzi/sparkwatch/releases/latest) 下载

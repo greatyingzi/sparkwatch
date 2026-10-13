@@ -78,6 +78,18 @@ reconciles the dashboard against independently read values. See
 
 ## Install
 
+### Homebrew
+
+```bash
+brew install --cask greatyingzi/tap/sparkwatch
+```
+
+One tap holds every app of mine, so this is the only tap to add. `brew upgrade
+--cask sparkwatch` updates it; `brew uninstall --cask --zap sparkwatch` removes the
+app and its settings. The first launch still needs the one approval described
+below — Homebrew 7 removed its `--no-quarantine` flag and hands the quarantine
+attribute to the installed app, so the cask prints the same instruction.
+
 ### Download the DMG
 
 Grab **`SparkWatch-0.3.0.dmg`** from

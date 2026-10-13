@@ -14,6 +14,23 @@ Click it for the full per-node readout: GPU utilisation / temperature / power,
 cache, PSI memory pressure, disk, running containers, and the model being served
 with its decode speed.
 
+## Preview
+
+The popover — one compact card per node, health and the running task on top,
+everything deeper one click away:
+
+![The SparkWatch popover: a compact card per node showing health, temperature,
+power, unified memory and the serving model with its decode speed, above
+buttons for the detail window, the inference source and shutdown](docs/screenshots/popover.png)
+
+The main window — fleet totals first, then a panel per machine and its history:
+
+![The SparkWatch main window: fleet decode rate, unified memory in use and
+engine state, followed by per-machine panels with GPU utilisation and history
+graphs](docs/screenshots/main-window.png)
+
+Both screenshots are a live run against two GB10 boxes.
+
 On the power numbers, also honestly: **two values, only one of them measured.**
 
 - **GPU 功耗 — measured.** NVML's `power.draw`, which on GB10 covers the GPU rail

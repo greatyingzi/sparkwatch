@@ -1,0 +1,10 @@
+.build/
+dist/
+*.xcodeproj/
+.DS_Store
+test-models/*.gguf
+*.log
+Support/
+.swiftpm/
+*.dSYM/
+Package.resolved

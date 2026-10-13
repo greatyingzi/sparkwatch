@@ -1,0 +1,107 @@
+name: Release
+
+# Publishing a release is a tag push:
+#
+#   git tag -a v0.3.1 -m "SparkWatch 0.3.1" && git push origin v0.3.1
+#
+# The app and the DMG are built from the tagged commit on a runner, so the
+# published artifact provably matches the tag rather than someone's laptop.
+#
+# A local build is still worth doing first (Scripts/build-app.sh then
+# Scripts/make-dmg.sh) — CI is the second opinion, not the debugger.
+
+on:
+  push:
+    tags: ["v*"]
+  # Re-run a release for a tag that already exists (e.g. an asset upload failed)
+  # without cutting a new tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build and publish (e.g. v0.3.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Toolchain
+        run: |
+          # swift-tools-version is 6.0, so a runner defaulting to Swift 5.x fails
+          # at the manifest. Pick the newest Xcode available if that happens,
+          # rather than failing with a confusing parse error.
+          if ! swift --version 2>&1 | grep -qE 'Swift version 6'; then
+            XC="$(ls -d /Applications/Xcode_1[6-9]*.app /Applications/Xcode_2[0-9]*.app 2>/dev/null | sort -V | tail -1)"
+            [ -n "$XC" ] && sudo xcode-select -s "$XC"
+          fi
+          swift --version
+          swift --version 2>&1 | grep -qE 'Swift version 6' || {
+            echo "::error::no Swift 6 toolchain on this runner"; exit 1; }
+
+      - name: Build and test
+        run: |
+          set -o pipefail
+          swift build -c release 2>&1 | tail -5
+          swift test 2>&1 | tail -5
+
+      - name: App bundle and DMG
+        env:
+          VERSION: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          export VERSION="${VERSION#v}"
+          ./Scripts/build-app.sh
+          ./Scripts/make-dmg.sh
+
+      - name: Verify the artifact
+        env:
+          VERSION: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          V="${VERSION#v}"
+          APP=dist/SparkWatch.app
+          plutil -lint "$APP/Contents/Info.plist"
+          INNER="$(plutil -extract CFBundleShortVersionString raw -o - "$APP/Contents/Info.plist")"
+          [ "$INNER" = "$V" ] || { echo "::error::bundle says $INNER, tag says $V"; exit 1; }
+          codesign --verify --strict --verbose=2 "$APP"
+          # Headless smoke test from the packaged copy: the real executable, no
+          # GUI session and no network (a synthetic fleet of two nodes).
+          "$APP/Contents/MacOS/SparkWatch" --print-status --demo-devices 2 | head -20
+          ls -l "dist/SparkWatch-$V.dmg"
+
+      - name: Checksums
+        env:
+          VERSION: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          V="${VERSION#v}"
+          cp "dist/SparkWatch-$V.dmg" .
+          shasum -a 256 "SparkWatch-$V.dmg" > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          V="${VERSION#v}"
+          TAG="v$V"
+          PRERELEASE=""
+          case "$V" in *-*) PRERELEASE="--prerelease" ;; esac   # 0.3.1-rc1 etc.
+
+          # GitHub's own changelog, with the install and first-launch steps
+          # appended: the release page is where someone actually lands, so the
+          # Gatekeeper step has to be on it and not only inside the DMG.
+          gh api -X POST "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+            -f tag_name="$TAG" --jq .body > /tmp/notes.md
+          cat .github/release-install-note.md >> /tmp/notes.md
+
+          gh release create "$TAG" --title "SparkWatch $V" --notes-file /tmp/notes.md $PRERELEASE
+          gh release upload "$TAG" --clobber "SparkWatch-$V.dmg" SHA256SUMS
+          gh release view "$TAG" --json assets --jq '.assets[] | "  \(.name)  \(.size) bytes  \(.digest)"'

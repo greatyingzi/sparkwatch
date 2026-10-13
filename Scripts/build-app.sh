@@ -12,7 +12,10 @@ cd "$ROOT"
 
 APP_NAME="SparkWatch"
 BUNDLE_ID="com.yingzi.sparkwatch"
-VERSION="0.3.0"
+# Overridable so a release workflow can stamp the tag's version into the bundle:
+# the published DMG must not be named one version while the app inside says
+# another. Falls back to the development version for local builds.
+VERSION="${VERSION:-0.3.0}"
 DIST="$ROOT/dist"
 APP="$DIST/$APP_NAME.app"
 ICNS="$ROOT/dist/AppIcon.icns"

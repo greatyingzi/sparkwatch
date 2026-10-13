@@ -29,6 +29,11 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
+        with:
+          # On a tag push this is the tag; on a manual re-run it must also be the
+          # tag, not the default branch — otherwise the "republish this version"
+          # path would build whatever main happens to be.
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Toolchain
         run: |

@@ -18,12 +18,22 @@ BUNDLE_ID="com.yingzi.sparkwatch"
 VERSION="${VERSION:-0.3.0}"
 DIST="$ROOT/dist"
 APP="$DIST/$APP_NAME.app"
-ICNS="$ROOT/dist/AppIcon.icns"
-
-echo "==> icon"
-if [ ! -f "$ICNS" ] || [ "$(find "$ROOT/Scripts/make-icon.py" -newer "$ICNS" 2>/dev/null)" != "" ]; then
-    python3 "$ROOT/Scripts/make-icon.py" "$DIST" >/dev/null
+# The icon is a committed asset (Assets/AppIcon.icns) rather than something every
+# build draws: the drawing script needs Pillow, and a release runner should not
+# depend on a Python imaging library to produce the artifact. Locally it still
+# redraws when the script is newer, so iterating on the art stays automatic —
+# guarded by an import check, because on a machine without Pillow the committed
+# asset is the right answer and an ImportError is not.
+ICNS="$ROOT/Assets/AppIcon.icns"
+if [ -f "$ICNS" ]     && python3 -c 'import PIL' 2>/dev/null     && [ "$(find "$ROOT/Scripts/make-icon.py" -newer "$ICNS" 2>/dev/null)" != "" ]; then
+    echo "==> icon (make-icon.py is newer, redrawing)"
+    python3 "$ROOT/Scripts/make-icon.py" "$ROOT/Assets" >/dev/null
 fi
+if [ ! -f "$ICNS" ]; then
+    echo "==> icon (no committed asset, generating)"
+    python3 "$ROOT/Scripts/make-icon.py" "$ROOT/Assets" >/dev/null
+fi
+echo "==> icon: $ICNS"
 
 echo "==> release build"
 swift build -c release --product "$APP_NAME"

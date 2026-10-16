@@ -16,12 +16,13 @@ enum DemoData {
                 name: String(format: "spark-%02d", index),
                 host: String(format: "dgx-spark-%02d", index)
             )
-            // Seven states, cycling: the two halves of a real TP pair, an idle box
-            // holding a model, one with a stale leftover next to a live service,
-            // a critical machine, a down one, and one still connecting. (The
-            // leftover state used to be a second `case 2`, which Swift treated as
-            // unreachable — that state never rendered.)
-            switch index % 7 {
+            // Eight states, cycling: the two halves of a real TP pair, an idle box
+            // holding a model, one with a stale leftover next to a live service, a
+            // critical machine, a down one, one whose dashboard session has
+            // expired (healthy-looking SSH numbers, no official channel), and one
+            // still connecting. (The leftover state used to be a second `case 2`,
+            // which Swift treated as unreachable — that state never rendered.)
+            switch index % 8 {
             case 0:
                 node.source = .dashboard
                 node.system = system(availableGB: 7.6, usedPct: 94, pressure: 0.0, cpu: 24, load: 3.2, uptime: 6.2)
@@ -80,6 +81,23 @@ enum DemoData {
                 node.error = "ssh spark-c 失败(255): connect timeout"
                 node.health = HealthReport(
                     level: .critical, reasons: ["无响应"], causes: [.unreachable], alert: true
+                )
+            case 6:
+                // 2026-10-16, as it actually looked: the session expired, the
+                // official channel is off, and the SSH fallback supplies every
+                // number — so the only honest signal is the credential state
+                // itself. This state exists so that signal gets rendered and
+                // reviewed instead of being discovered in production.
+                node.source = .sshFallback
+                node.system = system(availableGB: 62, usedPct: 52, pressure: 0.0, cpu: 12, load: 2.9, uptime: 10.5)
+                node.gpu = gpu(util: 96, temp: 84, powerW: 77.1, usedPct: 52)
+                node.inferenceConfigured = true
+                node.awaitingCredentials = true
+                node.error = CredentialGate.needsLoginReason
+                node.health = HealthReport(
+                    level: .warning,
+                    reasons: [CredentialGate.needsLoginReason],
+                    causes: [.needsLogin]
                 )
             default:
                 node.source = .sshFallback

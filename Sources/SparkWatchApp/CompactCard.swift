@@ -127,6 +127,13 @@ struct CompactCard: View {
                     Chip(text: Theme.levelLabel(snapshot.health.level),
                          tint: palette.accent(for: snapshot.health.level))
                 }
+                // The one degraded state whose cause cannot be read off the numbers:
+                // the SSH fallback keeps every figure plausible, so without this chip
+                // (and the button in `actions`) a node whose official channel is
+                // waiting for a password looks exactly like a healthy one.
+                if snapshot.awaitingCredentials {
+                    Chip(text: "需登录", tint: palette.warn)
+                }
             }
             Spacer(minLength: 4)
             Text(snapshot.host)
@@ -467,6 +474,19 @@ struct CompactCard: View {
             SourceMenu(snapshot: snapshot, source: inferenceSource, onChoose: onChooseSource, palette: palette)
 
             Spacer(minLength: 0)
+            // The fix, one click from the state that needs it: the card already
+            // says 需登录 in its head, and a state that requires an action should
+            // carry the action rather than sending the user off to the settings
+            // window to find it.
+            if snapshot.awaitingCredentials, !snapshot.connecting {
+                Button(action: onLogin) {
+                    Text("登录")
+                        .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                        .foregroundStyle(palette.accentText)
+                }
+                .buttonStyle(.plain)
+                .help("输入系统账号密码，恢复官方遥测通道")
+            }
             if let onShutdown, isLive {
                 Button(action: onShutdown) {
                     Text("关机")

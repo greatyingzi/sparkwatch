@@ -221,7 +221,19 @@ public enum StatusBarText {
     /// day, so naming it turned the quietest surface in the app into a permanent
     /// two-token alarm that said nothing.
     public static func isDeviating(_ snapshot: NodeSnapshot) -> Bool {
-        snapshot.source == .down || snapshot.health.alert || snapshot.health.level == .critical
+        if snapshot.source == .down || snapshot.health.alert || snapshot.health.level == .critical {
+            return true
+        }
+        // Deliberate exception to "only alert/critical earn a name".
+        //
+        // The rule above exists so a machine that is simply loaded (memory tight
+        // with a model resident) never turns the bar into standing noise. Waiting
+        // for a password is the opposite kind of condition: it is not a load
+        // pattern, it does not clear by itself, and no amount of staring at the
+        // numbers reveals it — the SSH fallback keeps them all plausible. On
+        // 2026-10-16 exactly that combination left the bar looking calm for hours
+        // while the official channel was dead. Naming the machine is the whole fix.
+        return snapshot.health.causes.contains(.needsLogin)
     }
 
     /// The name slot, or nil when this node should stay unnamed.
@@ -307,6 +319,9 @@ public enum StatusBarText {
     static func causeIndicator(for snapshot: NodeSnapshot) -> String {
         let causes = snapshot.health.causes
         if causes.contains(.unreachable) { return "✕" }
+        // Placed above the numeric branches: this one has no number to show, and
+        // it is the only cause whose cure is an action rather than a wait.
+        if causes.contains(.needsLogin) { return "需登录" }
         if causes.contains(.engineFatal) { return "引擎已崩" }
         if causes.contains(.engineStalled) { return "停滞" }
         if causes.contains(.lowPowerWedge) {

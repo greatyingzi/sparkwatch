@@ -894,6 +894,10 @@ public struct NodeSnapshot: Sendable, Identifiable {
     /// and ends up claiming 未配置 while a probe is still in flight.
     public var inferenceConfigured: Bool
     public var health: HealthReport
+    /// The dashboard channel is waiting for a password. Carried as its own flag
+    /// rather than inferred from an error string so every surface (menu bar,
+    /// card, login button, main window) agrees on what state this node is in.
+    public var awaitingCredentials: Bool = false
     public var error: String?
     public var updatedAt: Date
 
@@ -913,6 +917,7 @@ public struct NodeSnapshot: Sendable, Identifiable {
         connecting: Bool = false,
         inferenceConfigured: Bool = false,
         health: HealthReport = HealthReport(level: .unknown, reasons: []),
+        awaitingCredentials: Bool = false,
         error: String? = nil,
         updatedAt: Date = Date()
     ) {
@@ -931,6 +936,7 @@ public struct NodeSnapshot: Sendable, Identifiable {
         self.connecting = connecting
         self.inferenceConfigured = inferenceConfigured
         self.health = health
+        self.awaitingCredentials = awaitingCredentials
         self.error = error
         self.updatedAt = updatedAt
     }

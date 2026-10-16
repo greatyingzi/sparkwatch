@@ -59,6 +59,8 @@ public enum HealthCause: String, Sendable, Equatable {
     case memoryLow
     case swap
     case lowPowerWedge
+    /// The official telemetry channel is off because no one has signed in.
+    case needsLogin
     /// A failure with no structured rule behind it (e.g. a probe error).
     case other
 }
@@ -102,7 +104,8 @@ public struct HealthEvaluator: Sendable {
         system: SystemSample,
         source: DataSource,
         error: String?,
-        inference: InferenceSample? = nil
+        inference: InferenceSample? = nil,
+        awaitingCredentials: Bool = false
     ) -> HealthReport {
         guard source != .down else {
             return HealthReport(
@@ -233,8 +236,21 @@ public struct HealthEvaluator: Sendable {
             }
         }
 
-        if error != nil && level == .ok {
-            flag(.warning, error!, cause: .other)
+        // The official telemetry channel is off because nobody has signed in.
+        //
+        // This is not a hardware condition and it does not come and go with load:
+        // every other rule here describes something the box is doing, while this
+        // one stays until a human types a password. It therefore earns a place in
+        // the menu bar even at warning level (see `StatusBarText.isDeviating`).
+        // The alternative is what happened on 2026-10-16: the SSH fallback kept
+        // every number plausible, so the channel that had died was never mentioned
+        // anywhere the user would look.
+        if awaitingCredentials {
+            flag(.warning, CredentialGate.needsLoginReason, cause: .needsLogin)
+        }
+
+        if let error, level == .ok, error != CredentialGate.needsLoginReason {
+            flag(.warning, error, cause: .other)
         }
 
         // The engine's own verdict, reported by the engine itself.

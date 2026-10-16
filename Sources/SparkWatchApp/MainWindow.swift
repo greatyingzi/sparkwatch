@@ -126,6 +126,11 @@ struct MainWindowView: View {
 
     @Environment(\.colorScheme) private var colorScheme
 
+    /// The machine whose login sheet is open. Held here so every surface in the
+    /// window (the overview cards and the machine page) can offer the fix the
+    /// credential state calls for, instead of only the popover being able to.
+    @State private var loginNode: NodeSnapshot?
+
     private var palette: Palette { Palette.of(model.theme, dark: colorScheme == .dark) }
 
     var body: some View {
@@ -140,6 +145,15 @@ struct MainWindowView: View {
         .overlay {
             if state.paletteOpen {
                 CommandPalette(model: model, state: state, palette: palette)
+            }
+        }
+        .sheet(item: $loginNode) { snapshot in
+            LoginSheet(
+                snapshot: snapshot,
+                defaultUsername: model.signedInUsername(nodeID: snapshot.id)
+                    ?? snapshot.host.split(separator: "-").first.map(String.init) ?? "user"
+            ) { username, password in
+                await model.login(nodeID: snapshot.id, username: username, password: password)
             }
         }
     }
@@ -160,7 +174,7 @@ struct MainWindowView: View {
             OverviewPage(model: model, state: state, palette: palette, onOpenSettings: onOpenSettings)
         case let .machine(id):
             if let node = model.nodes.first(where: { $0.id == id }) {
-                MachinePage(model: model, node: node, palette: palette)
+                MachinePage(model: model, node: node, palette: palette, onLogin: { loginNode = node })
             } else {
                 MissingMachine(palette: palette) { state.page = .overview }
             }
@@ -411,6 +425,11 @@ struct OverviewPage: View {
     var palette: Palette
     var onOpenSettings: () -> Void
 
+    /// The machine whose login sheet is open — held here (not in the shell) so the
+    /// overview's own cards can offer the fix for a credential state, exactly like
+    /// the popover's cards do.
+    @State private var loginNode: NodeSnapshot?
+
     private var alive: Int { model.nodes.filter { $0.source != .down }.count }
 
     private var fleetDecode: Double {
@@ -444,6 +463,15 @@ struct OverviewPage: View {
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .topLeading)
+        .sheet(item: $loginNode) { snapshot in
+            LoginSheet(
+                snapshot: snapshot,
+                defaultUsername: model.signedInUsername(nodeID: snapshot.id)
+                    ?? snapshot.host.split(separator: "-").first.map(String.init) ?? "user"
+            ) { username, password in
+                await model.login(nodeID: snapshot.id, username: username, password: password)
+            }
+        }
     }
 
     private var header: some View {
@@ -641,7 +669,7 @@ struct OverviewPage: View {
                     },
                     powerEstimate: model.powerEstimate,
                     palette: palette,
-                    onLogin: {},
+                    onLogin: { loginNode = node },
                     onSignOut: {}
                 )
             }
@@ -655,6 +683,7 @@ struct MachinePage: View {
     @ObservedObject var model: AppModel
     var node: NodeSnapshot
     var palette: Palette
+    var onLogin: () -> Void = {}
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -681,6 +710,15 @@ struct MachinePage: View {
                 }
                 if let uptime = node.system.uptimeSeconds {
                     Chip(text: uptimeLabel(uptime), tint: .secondary)
+                }
+                // The machine page is where someone comes to ask "what is wrong
+                // with this box": the official channel waiting for a password is
+                // an answer, and it comes with its own fix.
+                if node.awaitingCredentials {
+                    Chip(text: "需登录", tint: palette.warn)
+                    Button("登录") { onLogin() }
+                        .controlSize(.small)
+                        .help("输入系统账号密码，恢复官方遥测通道")
                 }
                 Spacer(minLength: 0)
                 ShutdownButton(

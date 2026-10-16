@@ -119,12 +119,57 @@ public actor NodeRuntime {
             user: config.sshUser,
             localPort: config.dashboardLocalPort
         )
-        self.token = SessionStore.token(for: config.id)
-        if let token { self.tokenExpiry = TelemetryParser.jwtExpiry(token) }
+        // A token that is already stale on disk is not "progress": the sign-in wait
+        // keys off usable-ness, and a present-but-expired token used to be mistaken
+        // for one (see Credentials.swift). Decide it here — `init` is the one place
+        // that cannot call into the actor — and drop the stale token before any
+        // loop runs, in memory *and* on disk, because `SessionStore` is what the
+        // next launch reads.
+        let stored = SessionStore.token(for: config.id)
+        let storedExpiry = stored.flatMap(TelemetryParser.jwtExpiry)
+        if CredentialGate.isUsable(token: stored, expiry: storedExpiry) {
+            self.token = stored
+            self.tokenExpiry = storedExpiry
+        } else {
+            self.token = nil
+            self.tokenExpiry = nil
+            self.needsCredentials = true
+            if stored != nil { SessionStore.clear(for: config.id) }
+        }
     }
 
     public var configuration: NodeConfig { config }
     public var awaitingCredentials: Bool { needsCredentials }
+
+    /// What the credential wait reads. One place, so `token`/`tokenExpiry` can
+    /// never be compared out of step with each other.
+    var credentialState: CredentialState {
+        CredentialState(token: token, expiry: tokenExpiry)
+    }
+
+    /// Forget a token that can no longer authenticate — in memory *and* on disk.
+    ///
+    /// Keeping it would be load-bearing in a bad way: `SessionStore` is what the
+    /// next launch reads, so a stale token that survived a quit would put the app
+    /// straight back into the wait with nothing to wait for.
+    private func discardUnusableToken() {
+        guard token != nil else { return }
+        guard !CredentialGate.isUsable(credentialState) else { return }
+        token = nil
+        tokenExpiry = nil
+        needsCredentials = true
+        SessionStore.clear(for: config.id)
+    }
+
+    /// The dashboard channel is waiting for a password. Only the *transition* is
+    /// news: `updatedAt` is a freshness claim ("this data is this new"), and this
+    /// wait repeats once a second carrying no data, so re-marking it every pass
+    /// would keep stale numbers looking freshly measured.
+    private func noteCredentialWait() {
+        needsCredentials = true
+        guard dashboardLive || error != CredentialGate.needsLoginReason else { return }
+        markDashboardDown(reason: CredentialGate.needsLoginReason, refreshingFreshness: false)
+    }
 
     public func setAdoptionHandler(_ handler: @escaping @Sendable (UUID, String) async -> Void) {
         onEndpointAdopted = handler
@@ -354,8 +399,10 @@ public actor NodeRuntime {
             health: connecting
                 ? HealthReport(level: .unknown, reasons: [])
                 : healthEvaluator.evaluate(
-                    gpu: gpu, system: system, source: source, error: error, inference: inference
+                    gpu: gpu, system: system, source: source, error: error,
+                    inference: inference, awaitingCredentials: needsCredentials
                 ),
+            awaitingCredentials: needsCredentials,
             error: error,
             updatedAt: updatedAt
         )
@@ -408,9 +455,13 @@ public actor NodeRuntime {
     // MARK: - Loops
 
     private func ensureTunnel() {
-        if !tunnel.isRunning {
-            try? tunnel.start()
-        }
+        guard !tunnel.isRunning else { return }
+        // A failure here is tolerated rather than reported from this call site:
+        // `start()` already retires a spawn that never bound, and the loop's own
+        // readiness check (`isDashboard`) is what turns "no tunnel" into a reason
+        // the user sees. Logging it per pass would be noise for a state the UI
+        // already names.
+        try? tunnel.start()
     }
 
     /// A loopback URL for the engine endpoint, forwarded over the SSH channel we
@@ -447,16 +498,25 @@ public actor NodeRuntime {
         var attempt = 0
         while started {
             ensureTunnel()
-            guard let storedToken = token, tokenExpiry ?? .distantPast > Date() else {
-                needsCredentials = true
-                markDashboardDown(reason: "未登录（需要 Dashboard 账号密码）")
-                // Poll instead of one long sleep: a sign-in should light the node
-                // up within a second, not after the whole wait expires.
-                for _ in 0..<15 {
-                    if !started { return }
-                    if token != nil { break }
-                    try? await Task.sleep(for: .seconds(1))
-                }
+            // Load-bearing: a token that expired while the app kept running must
+            // stop looking like a credential before the guard reads it.
+            discardUnusableToken()
+            if token == nil {
+                // Wait for a sign-in. `CredentialWait` asks exactly the question
+                // the guard above asks, and sleeps on every pass — the previous
+                // inline version exited on "token != nil", which an *expired*
+                // token satisfied, so it spun a core per node instead of waiting
+                // (see Credentials.swift).
+                noteCredentialWait()
+                let signedIn = await CredentialWait.until(
+                    reading: { [self] in await credentialState },
+                    running: { [self] in await started },
+                    sleep: { try? await Task.sleep(for: .seconds($0)) }
+                )
+                guard started else { return }
+                guard signedIn != nil else { continue }
+            }
+            guard let storedToken = token, CredentialGate.isUsable(credentialState) else {
                 continue
             }
             needsCredentials = false
@@ -798,10 +858,16 @@ public actor NodeRuntime {
         }
     }
 
-    private func markDashboardDown(reason: String) {
+    /// The dashboard channel is down.
+    ///
+    /// `refreshingFreshness` is false for a failure that is *not* a new
+    /// observation of the machine (waiting for a password repeats while holding
+    /// no data): `updatedAt` is what the UI calls "last update", and pushing it
+    /// forward would present stale numbers as freshly measured.
+    private func markDashboardDown(reason: String, refreshingFreshness: Bool = true) {
         dashboardLive = false
         error = reason
-        updatedAt = Date()
+        if refreshingFreshness { updatedAt = Date() }
     }
 }
 

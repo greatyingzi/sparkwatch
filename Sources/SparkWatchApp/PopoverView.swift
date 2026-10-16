@@ -236,8 +236,18 @@ struct NodeCard: View {
                 } else if !snapshot.inferenceConfigured, inferenceSource == .auto {
                     Chip(text: "无推理端点", tint: .secondary)
                 }
+                if snapshot.awaitingCredentials {
+                    Chip(text: "需登录", tint: palette.warn)
+                }
             }
             Spacer(minLength: 6)
+            // The state's own cure, next to the state: the official channel is off
+            // until someone signs in, and the numbers below look healthy meanwhile.
+            if snapshot.awaitingCredentials, !snapshot.connecting {
+                Button("登录") { onLogin() }
+                    .controlSize(.small)
+                    .help("输入系统账号密码，恢复官方遥测通道")
+            }
             // Cores + uptime as context next to the host, so the metric grid can
             // spend its cells on live numbers.
             Text(headerContext)
@@ -1032,6 +1042,13 @@ struct PopoverView: View {
             let alive = model.nodes.filter { $0.source != .down }.count
             Chip(text: "\(alive)/\(model.nodes.count) 在线",
                  tint: alive == model.nodes.count ? palette.ok : palette.warn)
+            // Said once, at the top: how many machines are waiting for a password.
+            // Without it the state is only visible per card, and the whole point
+            // of this change is that it stops being invisible.
+            let awaiting = model.nodes.filter(\.awaitingCredentials).count
+            if awaiting > 0 {
+                Chip(text: "\(awaiting) 台需登录", tint: palette.warn)
+            }
             Spacer(minLength: 4)
             Text(String(format: "Live · %.0f s", model.pollSeconds))
                 .font(.system(size: 9.5, design: .monospaced))
@@ -1060,7 +1077,12 @@ struct PopoverView: View {
 
     private var footer: some View {
         HStack(spacing: 10) {
-            ForEach(model.nodes.filter { $0.source == .down }) { snapshot in
+            // `awaitingCredentials` matters as much as `down` here: a node whose
+            // official channel is off still shows numbers (SSH fallback), so its
+            // login button used to be hidden behind a state it never entered —
+            // 2026-10-16, the popover offered no way to fix the very condition the
+            // menu bar was about to name.
+            ForEach(model.nodes.filter { $0.source == .down || $0.awaitingCredentials }) { snapshot in
                 Button("登录 \(snapshot.name)") { loginNode = snapshot }
                     .controlSize(.small)
             }

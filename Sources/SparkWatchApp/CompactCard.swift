@@ -180,11 +180,12 @@ struct CompactCard: View {
                     )
                     KVBox(
                         key: "整机 ≈",
-                        value: powerEstimate.wholeMachineW(gpuW: snapshot.gpu.powerW)
+                        value: (snapshot.power?.wallW
+                            ?? powerEstimate.wholeMachineW(gpuW: snapshot.gpu.powerW))
                             .map { String(format: "%.0f", $0) } ?? "--",
                         unit: "W",
-                        tint: .secondary,
-                        help: "按 GPU 轨拟合的估值（两个墙上功率计锚点解出），不是实测"
+                        tint: snapshot.power?.confidence == .low ? palette.warn : .secondary,
+                        help: wholePowerHelp
                     )
                 }
                 HStack(spacing: 4) {
@@ -548,6 +549,21 @@ struct CompactCard: View {
     /// the raw reading swings tens of watts every couple of seconds, so a stable
     /// number is the only readable one — and the raw sample stays one hover away,
     /// because a smoothed figure nobody can check is just a nicer-looking lie.
+    /// What the `≈W` cell actually is: one shared model, with its inputs spelled
+    /// out. A smoothed number that cannot be checked is a prettier lie.
+    private var wholePowerHelp: String {
+        guard let reading = snapshot.power else {
+            return "按 GPU 轨拟合的估值，不是实测（GB10 没有整机功率计）"
+        }
+        var text = powerEstimate.formula(for: reading) + "\n"
+        text += reading.cpuAssumed
+            ? "CPU 占用未读到，按 20% 估。\n"
+            : "输入：GPU 轨实测 + CPU 占用（按频率加权）。\n"
+        if let note = reading.note { text += "低置信：\(note)\n" }
+        text += "口径：2026 固件公开墙端锚点约束拟合（空载 22–25W / 解码 45W / 推理 60–90W / 双机 TP 117W / CPU 满载 120–130W / GPU 满载 170W），锚点最大残差 10.9W。"
+        return text
+    }
+
     private var powerHelp: String {
         guard let mean = snapshot.gpu.powerW else { return "GPU 轨实测功耗（NVML power.draw）" }
         let window = powerWindowSeconds > 0

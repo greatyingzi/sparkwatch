@@ -31,6 +31,7 @@ struct MachinePanels: View {
                 gpuPanel
                 unifiedMemoryPanel
                 cpuPanel
+                thermalAndFaultPanel
             }
             .frame(maxWidth: .infinity, alignment: .top)
 
@@ -43,6 +44,126 @@ struct MachinePanels: View {
             }
             .frame(width: 420, alignment: .top)
         }
+    }
+
+    // MARK: - Thermal margin, clock lock, failure signature, last shutdown
+
+    /// Four facts that each answer "is this box about to hurt itself", and that no
+    /// other panel expresses together.
+    ///
+    ///  * **thermal margin** — the ACPI zone's distance from its *own* trip point,
+    ///    plus the rate of climb. This hardware power-offs at ~96 °C while
+    ///    declaring 104.8 °C, so a level test near the ceiling can never fire in
+    ///    time; a slope can (the crash curve is 92 → 96 °C in ~150 s).
+    ///  * **clock lock** — `-lgc` is the one real power lever on a Spark, it costs
+    ///    ~0 % on bandwidth-bound decode, and it does not survive a reboot.
+    ///  * **failure signature** — four documented modes with four different
+    ///    actions: RMA / lock+airflow / driver upgrade / power drain.
+    ///  * **last shutdown** — read off-box from the previous boot's journal, the
+    ///    only copy that survives a power cut.
+    private var thermalAndFaultPanel: some View {
+        Panel(title: "热与故障", palette: palette) {
+            VStack(alignment: .leading, spacing: 10) {
+                statLine("热区", thermalZoneText, tint: thermalZoneTint, help: thermalZoneHelp)
+                statLine("热余量", thermalMarginText, tint: thermalMarginTint, help: thermalMarginHelp)
+                statLine("锁频", node.clockLock?.label ?? "未知", tint: palette.textStrong, help: clockLockHelp)
+                statLine(
+                    "故障模式",
+                    node.faultMode.map { "\($0.label)（\($0.token)）" } ?? "未命中已知模式",
+                    tint: node.faultMode == nil ? palette.muted : (node.faultMode == .thermalLimit ? palette.warn : palette.danger),
+                    help: faultModeHelp
+                )
+                if let forensics = node.forensics {
+                    statLine(
+                        "上次关机",
+                        forensics.label,
+                        tint: forensics.verdict == .cleanShutdown ? palette.muted : palette.warn,
+                        help: forensics.summary
+                            + (forensics.previousBootTail.isEmpty
+                                ? ""
+                                : "\n上次日志尾部：\n" + forensics.previousBootTail.joined(separator: "\n"))
+                    )
+                }
+                if let age = node.fastSampleAge {
+                    statLine(
+                        "2s 通道",
+                        age < 6 ? String(format: "在线（%.0fs 前）", age) : String(format: "已停 %.0f 秒", age),
+                        tint: age < 6 ? palette.muted : palette.warn,
+                        help: "常驻 SSH 会每 2 秒采一次 acpitz / SM 时钟 / 功耗。它比 60 秒慢通道快 30 倍，是断电前留证的唯一来源；停了这个数字会变黄。"
+                    )
+                }
+            }
+        }
+    }
+
+    private var thermalZoneText: String {
+        guard let zone = system.cpuTempC else { return "--" }
+        return system.thermalLimitC.map { String(format: "%.0f / %.0f °C", zone, $0) }
+            ?? String(format: "%.0f °C", zone)
+    }
+
+    private var thermalZoneTint: Color? {
+        guard let zone = system.cpuTempC, let limit = system.thermalLimitC else { return palette.textStrong }
+        let margin = limit - zone
+        if margin <= 8 { return palette.danger }
+        if margin <= 18 { return palette.warn }
+        return palette.textStrong
+    }
+
+    private var thermalZoneHelp: String {
+        "最热 ACPI 热区（GB10 没有 CPU 封装温度传感器）/ 该热区自己声明的 trip point。"
+            + "注意 nvidia-smi 比热区低 8–15°C：实测断电前最后样本是热区 92.2°C、smi 84°C，所以判断热状态必须看这一行。"
+    }
+
+    private var thermalMarginText: String {
+        guard let zone = system.cpuTempC else { return "--" }
+        let limit = system.thermalLimitC ?? 100
+        let margin = limit - zone
+        let trend = node.thermalTrend.map { String(format: " %+.1f°/min", $0.slopePerMinute) } ?? ""
+        return String(format: "%.0f °C%@", margin, trend)
+    }
+
+    private var thermalMarginTint: Color? {
+        guard let zone = system.cpuTempC else { return palette.textStrong }
+        let margin = (system.thermalLimitC ?? 100) - zone
+        let climbing = (node.thermalTrend?.slopePerMinute ?? 0) >= 0.5
+        if margin <= 12 { return palette.danger }
+        if margin <= 22, climbing { return palette.warn }
+        if margin <= 18 { return palette.warn }
+        return palette.textStrong
+    }
+
+    private var thermalMarginHelp: String {
+        "距热区上限的余量，以及最近几分钟的升温速率（最小二乘，窗口 5 分钟，需 ≥90 秒数据）。"
+            + "这台机器是约 96°C 硬断电、而上限声明 104.8°C，所以绝对阈值永远来不及："
+            + "现场曲线是 150 秒内从 92°C 爬到 96°C（≈1.5°C/min）。"
+    }
+
+    private var clockLockHelp: String {
+        "nvidia-smi 不会回读锁频状态（Applications/Max Clocks 始终显示 2418/3003），"
+            + "所以这里是在负载下统计 SM 时钟：锁 2200 时实测稳定在 2164–2184MHz（±40MHz 内持平），"
+            + "未锁时自由 boost 到 2400+。锁频不跨重启，需要 systemd oneshot。"
+            + "\n省电参考：锁 2200MHz 峰值功耗 −21%，而带宽受限的 MoE 解码几乎不损失速度。"
+    }
+
+    private var faultModeHelp: String {
+        guard let mode = node.faultMode else {
+            return "四种已知故障签名都没命中：时钟崩溃（util 高/功耗≤25W/时钟≤800MHz）、"
+                + "PCIe 供电不足（启动后仍有 insufficient power 事件且功耗卡 27–30W）、"
+                + "热节流（热降频位有效）、5W 驱动 bug（仅 550.x）。"
+        }
+        return "\(mode.label)：\(mode.action)"
+    }
+
+    private var wholePowerHelp: String {
+        guard let reading = node.power else {
+            return "按 GPU 轨拟合的估值，不是实测"
+        }
+        var text = "\(model.powerEstimate.formula(for: reading))\n"
+        text += reading.cpuAssumed ? "CPU 占用未读到，按 20% 估。\n" : "输入：GPU 轨实测 + CPU 占用（含频率权重）。\n"
+        if let note = reading.note { text += "低置信：\(note)\n" }
+        text += "GB10 没有任何整机功率计（无 RAPL / hwmon 功率输入 / PD 遥测），这一项只能是拟合值。"
+        return text
     }
 
     // MARK: - GPU
@@ -71,9 +192,10 @@ struct MachinePanels: View {
                                  gpu.powerW.map { String(format: "%.1f W", $0) } ?? "--",
                                  help: "NVML power.draw，只覆盖 GPU 那一侧；整机没有功率计")
                         statLine("整机 ≈",
-                                 model.powerEstimate.wholeMachineW(gpuW: gpu.powerW)
+                                 (node.power?.wallW
+                                    ?? model.powerEstimate.wholeMachineW(gpuW: gpu.powerW))
                                     .map { String(format: "%.0f W", $0) } ?? "--",
-                                 help: "按 GPU 轨拟合的估值，不是实测")
+                                 help: wholePowerHelp)
                         statLine("SM 时钟",
                                  gpu.smClockMHz.map { String(format: "%.2f GHz", $0 / 1000) } ?? "--",
                                  help: "降频判据：利用率高但时钟塌到 ≤800 MHz 且功耗低")

@@ -109,8 +109,39 @@ public actor NodeRuntime {
     /// really just "still connecting" and must not be reported as failed.
     private var everLive = false
 
+    // MARK: Thermal stream (2 s) and the evidence it leaves behind
+
+    /// One standing SSH session sampling `acpitz` + SM clock + power every 2 s.
+    ///
+    /// The 60 s slow probe is far too coarse for the failure mode this hardware
+    /// actually has: the clock collapses 2450 → 1475 in ~150 s and the box then
+    /// hard power-offs at ~96 °C zone temperature. Two or three points cannot
+    /// describe that, and `acpitz`/clock were only ever read on the slow probe.
+    private let thermalStream: ThermalStream
+    private var fastSample: ThermalSample?
+    private var fastSampleAt: Date?
+    /// The box's current boot identity, for reboot detection.
+    private var bootID: String?
+    /// How the box stopped last time, once we have asked.
+    private var forensics: BootForensics?
+    private var forensicsInFlight = false
+    private var clockLockDetector = ClockLockDetector()
+    private var clockLock: ClockLockState?
+    /// True while this node is a member of a multi-node deployment. The wall draw
+    /// of a rank waiting on its peer is not the same function of its GPU rail.
+    private var collective = false
+    /// The one power model. Kept here so `snapshot()` can compute the reading where
+    /// the CPU side and the topology are known, and so the cards, the menu bar and
+    /// the energy ledger cannot disagree (they used to: two different formulas).
+    private var powerEstimate = PowerEstimate()
+    /// Per-section line counts from the last slow probe, for `--print-status`.
+    private var slowProbeSections: [String: Int] = [:]
+
     public init(config: NodeConfig) {
         self.config = config
+        self.thermalStream = ThermalStream(
+            user: config.sshUser, host: config.sshHost, intervalSeconds: 2
+        )
         self.dashboard = DashboardClient(
             baseURL: URL(string: "http://127.0.0.1:\(config.dashboardLocalPort)")!
         )
@@ -178,9 +209,11 @@ public actor NodeRuntime {
     public func configure(
         sampleInterval: TimeInterval,
         slowProbeInterval: TimeInterval,
-        powerWindowSeconds: Double = 8
+        powerWindowSeconds: Double = 8,
+        power: PowerEstimate = PowerEstimate()
     ) {
         setPowerWindow(powerWindowSeconds)
+        powerEstimate = power
 
         self.sampleInterval = sampleInterval
         self.slowProbeInterval = slowProbeInterval
@@ -192,6 +225,7 @@ public actor NodeRuntime {
         Task { await hardwareLoop() }
         Task { await slowLoop() }
         Task { await inferenceLoop() }
+        startThermalStream()
         if config.inferenceSource == .hidden {
             // The user said "not interesting": stop probing, and stop the
             // scanner from adopting something on its own.
@@ -258,6 +292,7 @@ public actor NodeRuntime {
 
     public func stop() {
         started = false
+        thermalStream.stop()
         inferenceTunnel?.stop()
         inferenceTunnel = nil
         tunnel.stop()
@@ -321,6 +356,115 @@ public actor NodeRuntime {
 
     public func setTaskRole(_ role: String?) { taskRole = role }
 
+    /// Told by the cluster layer when this node belongs to a multi-node task.
+    public func setCollective(_ value: Bool) { collective = value }
+
+    /// Age of the newest 2 s thermal sample, or nil when the stream never delivered
+    /// one. The UI needs this: a stream that died must not look like a box whose
+    /// temperature happens to be steady.
+    public var thermalSampleAge: TimeInterval? {
+        fastSampleAt.map { Date().timeIntervalSince($0) }
+    }
+
+    // MARK: - Thermal stream handling
+
+    private func startThermalStream() {
+        thermalStream.start { [weak self] event in
+            Task { await self?.handleThermal(event) }
+        }
+    }
+
+    private func handleThermal(_ event: ThermalStreamEvent) async {
+        guard started else { return }
+        switch event {
+        case let .boot(identity):
+            let changed = bootID.map { $0 != identity.bootID } ?? false
+            bootID = identity.bootID
+            sshLive = true
+            everLive = true
+            // One forensic read per launch, plus one per detected reboot. This is
+            // the read that can say "the box did not shut down cleanly" — and it
+            // has to happen while the *previous* boot's log still exists.
+            if changed || forensics == nil {
+                await collectForensics()
+            }
+        case let .sample(sample):
+            fastSample = sample
+            fastSampleAt = sample.at
+            applyThermal(sample)
+        }
+    }
+
+    /// Merge a 2 s sample into the channel-owned fields.
+    ///
+    /// This is the same hazard the SM clock already had: one channel replacing a
+    /// whole struct silently drops what only another channel can fill. So the fast
+    /// sample owns `acpitz`/clock/CPU util *while it is fresh*, and the slow probe
+    /// only fills what is missing.
+    private func applyThermal(_ sample: ThermalSample) {
+        sshLive = true
+        everLive = true
+        if let temp = sample.acpitzMaxC { system.cpuTempC = temp }
+        if let limit = sample.thermalLimitC { system.thermalLimitC = limit }
+        if let pct = sample.cpuUsagePct { system.cpuUsagePct = pct }
+        if let freq = sample.cpuFreqMHz { system.cpuFreqMHz = freq }
+        if let maxFreq = sample.cpuFreqMaxMHz { system.cpuFreqMaxMHz = maxFreq }
+        if let clock = sample.smClockMHz { smClockMHz = clock }
+
+        var g = gpu
+        if let maxClock = sample.smClockMaxMHz {
+            var throttle = g.throttle ?? ThrottleInfo()
+            throttle.smClockMaxMHz = maxClock
+            g.throttle = throttle
+        }
+        // Throttle reasons at 2 s instead of once a minute: a thermal limit that
+        // comes and goes inside a minute was invisible before.
+        var throttle = g.throttle ?? ThrottleInfo()
+        throttle.thermal = sample.thermalSlowdown || sample.hwSlowdown
+        throttle.hardware = sample.hwSlowdown
+        throttle.powerCap = sample.powerCapActive
+        throttle.smClockMHz = sample.smClockMHz ?? throttle.smClockMHz
+        g.throttle = throttle
+
+        // The dashboard channel (1 Hz) stays authoritative for what it carries;
+        // this fills in only when it is not delivering.
+        if !dashboardLive {
+            if let util = sample.utilPct { g.utilPct = util }
+            if let temp = sample.gpuTempC { g.tempC = temp }
+            if let watts = sample.gpuW {
+                powerSmoother.add(watts, at: sample.at.timeIntervalSince1970)
+                g.powerInstantW = watts
+                g.powerW = powerSmoother.mean ?? watts
+            }
+            updatedAt = Date()
+        }
+        gpu = g
+
+        let utilForLock = sample.utilPct ?? (dashboardLive ? gpu.utilPct : nil)
+        clockLock = clockLockDetector.update(
+            at: sample.at,
+            clockMHz: sample.smClockMHz,
+            utilPct: utilForLock,
+            thermalSlowdown: throttle.thermal
+        )
+    }
+
+    /// Ask the box how the previous boot ended. Read-only, one SSH round trip.
+    private func collectForensics() async {
+        guard !forensicsInFlight else { return }
+        forensicsInFlight = true
+        defer { forensicsInFlight = false }
+        do {
+            let result = try await CrashForensics.collect(
+                user: config.sshUser, host: config.sshHost
+            )
+            forensics = result
+        } catch {
+            // Keep whatever we already knew: a failed read is not evidence of a
+            // clean shutdown.
+        }
+    }
+
     public func currentProcesses() -> [InferenceProcessInfo] { processes }
 
     public func applyProcesses(_ infos: [InferenceProcessInfo]) { processes = infos }
@@ -373,6 +517,28 @@ public actor NodeRuntime {
         // Merge the slow-channel-only fields into the GPU sample at snapshot time.
         var gpu = self.gpu
         gpu.smClockMHz = smClockMHz
+
+        let health = connecting
+            ? HealthReport(level: .unknown, reasons: [])
+            : healthEvaluator.evaluate(
+                gpu: gpu, system: system, source: source, error: error,
+                inference: inference, awaitingCredentials: needsCredentials
+            )
+
+        // One power reading, computed here — where the GPU rail, the CPU side and
+        // the topology are all in scope. Every card, the menu bar and the energy
+        // ledger read this same number instead of each running its own formula
+        // (they disagreed by up to 62 W before).
+        var freqRatio: Double?
+        if let freq = system.cpuFreqMHz, let maxFreq = system.cpuFreqMaxMHz, maxFreq > 0 {
+            freqRatio = min(1.2, freq / maxFreq)
+        }
+        let power = powerEstimate.estimate(
+            gpuW: gpu.powerW,
+            cpuUsagePct: system.cpuUsagePct,
+            cpuFreqRatio: freqRatio
+        )
+
         return NodeSnapshot(
             id: config.id,
             name: config.name,
@@ -396,15 +562,18 @@ public actor NodeRuntime {
             inferenceNote: suppressInferenceProbe ? nil : discoveryNote,
             connecting: connecting,
             inferenceConfigured: config.inferenceMetricsURL?.isEmpty == false,
-            health: connecting
-                ? HealthReport(level: .unknown, reasons: [])
-                : healthEvaluator.evaluate(
-                    gpu: gpu, system: system, source: source, error: error,
-                    inference: inference, awaitingCredentials: needsCredentials
-                ),
+            health: health,
             awaitingCredentials: needsCredentials,
             error: error,
-            updatedAt: updatedAt
+            updatedAt: updatedAt,
+            power: power,
+            faultMode: health.faultMode,
+            clockLock: clockLock,
+            thermalTrend: healthEvaluator.lastThermalTrend,
+            forensics: forensics,
+            collective: collective,
+            fastSampleAge: thermalSampleAge,
+            slowProbeSections: slowProbeSections
         )
     }
 
@@ -572,7 +741,21 @@ public actor NodeRuntime {
                 lastSlowProbe = Date()
                 do {
                     let result = try await SshProbe.collect(user: config.sshUser, host: config.sshHost)
-                    system = result.system
+                    // Merge rather than replace. The 2 s thermal stream owns the
+                    // zone temperature, CPU utilisation and clocks while it is
+                    // alive; a wholesale assignment here silently wiped them —
+                    // the exact failure that once made the wedge rule never see a
+                    // clock (`absorbed(_:)`).
+                    var fresh = result.system
+                    if let age = thermalSampleAge, age < 15 {
+                        fresh.cpuTempC = system.cpuTempC ?? fresh.cpuTempC
+                        fresh.thermalLimitC = system.thermalLimitC ?? fresh.thermalLimitC
+                        fresh.cpuUsagePct = system.cpuUsagePct ?? fresh.cpuUsagePct
+                        fresh.cpuFreqMHz = system.cpuFreqMHz ?? fresh.cpuFreqMHz
+                        fresh.cpuFreqMaxMHz = system.cpuFreqMaxMHz ?? fresh.cpuFreqMaxMHz
+                    }
+                    system = fresh
+                    slowProbeSections = result.sectionLines
                     // A kernel counter that *rose* is the event; the absolute
                     // value is only a baseline (see KernelErrors). Kept for an
                     // hour so the finding cannot be missed by a single glance
@@ -602,11 +785,15 @@ public actor NodeRuntime {
                     // unified pool (never nvidia-smi memory on GB10).
                     // Always: the dashboard stream carries no clocks, and the
                     // wedge rule needs them even while the dashboard is live.
-                    if let clock = result.smClockMHz { smClockMHz = clock }
+                    if let clock = result.smClockMHz, (thermalSampleAge ?? .infinity) > 10 {
+                        smClockMHz = clock
+                    }
                     // The throttle reasons and the power limit are SSH-only: the
                     // dashboard stream carries neither, so they are copied here
                     // and preserved across dashboard ticks (see `absorbed`).
-                    if let throttle = result.gpu.throttle {
+                    // While the fast stream is alive it is the fresher source, so
+                    // the 60 s copy must not overwrite it.
+                    if let throttle = result.gpu.throttle, (thermalSampleAge ?? .infinity) > 10 {
                         gpu.throttle = ThrottleInfo(
                             thermal: throttle.thermal,
                             hardware: throttle.hardware,
@@ -907,7 +1094,8 @@ public actor ClusterCollector {
             await runtime.configure(
                 sampleInterval: settings.sampleIntervalSeconds,
                 slowProbeInterval: settings.slowProbeIntervalSeconds,
-                powerWindowSeconds: settings.powerWindowSeconds
+                powerWindowSeconds: settings.powerWindowSeconds,
+                power: settings.powerEstimate
             )
             await runtime.start()
             runtimes[node.id] = runtime
@@ -972,6 +1160,10 @@ public actor ClusterCollector {
             _ = taskID
             for nodeName in task.nodes {
                 guard let id = byName[nodeName], let runtime = runtimes[id] else { continue }
+                // A multi-node deployment draws differently per box than a solo
+                // one — a rank waiting on its peer keeps the link burning while
+                // its GPU rail reads low. The power model is told which it is.
+                await runtime.setCollective(task.nodes.count > 1)
                 // A pinned or hidden row is an explicit instruction from the
                 // person watching: the topology must not overwrite it.
                 if await runtime.inferenceSource != .auto && engineOverride.isEmpty { continue }
@@ -1014,12 +1206,14 @@ public actor ClusterCollector {
                 guard let runtime = runtimes[node.id] else { continue }
                 await runtime.setSuppressInferenceProbe(false)
                 await runtime.setTaskRole(nil)
+                await runtime.setCollective(false)
             }
         }
         if tasks.isEmpty {
             for (id, runtime) in runtimes where byID[id] != nil {
                 await runtime.setSuppressInferenceProbe(false)
                 await runtime.setTaskRole(nil)
+                await runtime.setCollective(false)
             }
         }
         return tasks

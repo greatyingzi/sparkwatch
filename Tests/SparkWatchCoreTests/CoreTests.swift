@@ -436,18 +436,33 @@ struct PauseTests {
 
 @Suite("整机功耗预估")
 struct PowerEstimateTests {
-    /// The two wall-meter anchors the coefficients are solved from.
+    /// The 2026-firmware wall-meter anchors the coefficients are fitted to.
+    ///
+    /// These moved when the model did: the old two-point fit (`12 + 2.20×GPU`)
+    /// anchored on the *pre-CX7-hotplug* idle figure of 38 W, which current
+    /// firmware no longer draws (22–25 W headless), and it had no CPU term at all
+    /// — a CPU-saturated box read 38 W against a measured 120–130 W.
     @Test func matchesTheWallMeterAnchors() {
-        let estimate = PowerEstimate()               // base 12 W, k 2.20
-        // idle, no model: GPU 11.8 W -> 38 W at the wall
-        #expect(abs((estimate.wholeMachineW(gpuW: 11.8) ?? 0) - 38) < 0.5)
-        // generating: GPU 47.7 W -> 117 W per box (two-node Shelly, 234 W / 2)
-        #expect(abs((estimate.wholeMachineW(gpuW: 47.7) ?? 0) - 117) < 0.5)
+        let estimate = PowerEstimate()
+        // idle, headless, current firmware: GPU ~11 W → 22–25 W at the wall
+        let idle = estimate.estimate(gpuW: 11.8, cpuUsagePct: 3)!.wallW
+        #expect(idle >= 20 && idle <= 26)
+        // generating on a two-node TP pair: GPU 47.7 W → 117 W per box
+        // (Shelly on the pair, 234 W / 2), with the CPU busy on collectives.
+        let pair = estimate.estimate(gpuW: 47.7, cpuUsagePct: 40)!.wallW
+        #expect(abs(pair - 117) <= 8)
+        // CPU saturated, GPU idle: 120–130 W measured.
+        let cpuBound = estimate.estimate(gpuW: 12, cpuUsagePct: 100)!.wallW
+        #expect(cpuBound >= 108 && cpuBound <= 130)
     }
 
-    @Test func neverExceedsTheAdapter() {
+    /// 240 W is the adapter's rating, not a measurement: nothing on this hardware
+    /// reaches it (a saturated Spark lands near 180–200 W), so the model caps at
+    /// the measured ceiling.
+    @Test func neverExceedsTheMeasuredCeiling() {
         let estimate = PowerEstimate()
-        #expect(estimate.wholeMachineW(gpuW: 10_000) == 240)
+        #expect(estimate.wholeMachineW(gpuW: 10_000) == estimate.capW)
+        #expect(estimate.capW < 240)
     }
 
     @Test func noGpuReadingMeansNoEstimate() {
@@ -460,8 +475,9 @@ struct PowerEstimateTests {
 
     @Test func coefficientsAreTunable() {
         var estimate = PowerEstimate()
-        estimate.baseW = 30
-        estimate.perGpuW = 2
-        #expect(estimate.wholeMachineW(gpuW: 50) == 130)
+        estimate.kGpu = 2
+        estimate.kCpu = 0
+        estimate.floorW = 0
+        #expect(estimate.wholeMachineW(gpuW: 50) == 100)
     }
 }

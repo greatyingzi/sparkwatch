@@ -487,7 +487,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             + " mem=\(mem) gpuW=\(gpu.powerW.map { String(format: "%.1f", $0) } ?? "-")"
             + " clk=\(gpu.smClockMHz.map { String(format: "%.0f", $0) } ?? "-")"
             + " rawW=\(gpu.powerInstantW.map { String(format: "%.1f", $0) } ?? "-")"
-            + " wholeW=\(model.powerEstimate.wholeMachineW(gpuW: gpu.powerW).map { String(format: "%.0f", $0) } ?? "-")"
+            + " wholeW=\((snapshot.power?.wallW ?? model.powerEstimate.wholeMachineW(gpuW: gpu.powerW)).map { String(format: "%.0f", $0) } ?? "-")"
+            + " wholeConf=\(snapshot.power?.confidence.rawValue ?? "-")"
+            + " cpuPct=\(snapshot.system.cpuUsagePct.map { String(format: "%.0f", $0) } ?? "-")"
+            + " cpuFreq=\(snapshot.system.cpuFreqMHz.map { String(format: "%.0f", $0) } ?? "-")"
+            + " trend=\(snapshot.thermalTrend.map { String(format: "%+.1f/min", $0.slopePerMinute) } ?? "-")"
+            + " lock=\(snapshot.clockLock?.label ?? "-")"
+            + " fault=\(snapshot.faultMode?.rawValue ?? "-")"
+            + " pcieLate=\(snapshot.system.pcieLatePowerEvents.map(String.init) ?? "-")"
+            + " driver=\(snapshot.system.driverVersion ?? "-")"
+            + " fastAge=\(snapshot.fastSampleAge.map { String(format: "%.1f", $0) } ?? "-")"
+            + " lastBoot=\(snapshot.forensics?.verdict.rawValue ?? "-")"
             + " role=\(snapshot.inference?.taskRole ?? "-")"
             + " src=\(snapshot.inferenceSourceLabel)"
             + " cand=[\(snapshot.inferenceCandidates.map { ":\($0.port)\($0.engine.map { " \($0)" } ?? "")" }.joined(separator: ", "))]"
@@ -562,7 +572,12 @@ if CommandLine.arguments.contains("--print-status") {
             // down. This is a diagnostic; 40 s of patience is cheaper than a dump
             // that quietly reports half the truth.
             let started = Date()
-            while Date().timeIntervalSince(started) < 40 {
+            // Long enough for the slow probe (and, on request, long enough for the
+            // 2 s thermal stream to produce a slope and a clock-lock verdict — both
+            // need tens of seconds of history).
+            let wait = ProcessInfo.processInfo.environment["SPARKWATCH_PRINT_WAIT"]
+                .flatMap(Double.init) ?? 40
+            while Date().timeIntervalSince(started) < wait {
                 await model.refresh()
                 try? await Task.sleep(for: .milliseconds(500))
             }
@@ -581,6 +596,42 @@ if CommandLine.arguments.contains("--print-status") {
             let causes = node.health.causes.map(\.rawValue).joined(separator: ",")
             print("node \(node.name) source=\(node.source.rawValue) level=\(node.health.level.label)"
                 + " gpu=\(gpu) tps=\(tps) causes=\(causes) [\(health)]")
+            // The evidence layer: every input the power estimate, the thermal rule
+            // and the failure classifier consume. Without these a verdict cannot be
+            // checked from the dump — which is the whole point of this flag.
+            let power = node.power
+            print("  power wholeW=\(power.map { String(format: "%.0f", $0.wallW) } ?? "-")"
+                + " conf=\(power?.confidence.rawValue ?? "-")"
+                + " cpu=\(node.system.cpuUsagePct.map { String(format: "%.0f%%", $0) } ?? "-")"
+                + " freq=\(node.system.cpuFreqMHz.map { String(format: "%.0f", $0) } ?? "-")"
+                + " note=\(power?.note ?? "-")")
+            print("  thermal zone=\(node.system.cpuTempC.map { String(format: "%.1f", $0) } ?? "-")"
+                + " limit=\(node.system.thermalLimitC.map { String(format: "%.1f", $0) } ?? "-")"
+                + " trend=\(node.thermalTrend.map { String(format: "%+.2f/min over %.0fs", $0.slopePerMinute, $0.spanSeconds) } ?? "-")"
+                + " fastAge=\(node.fastSampleAge.map { String(format: "%.1fs", $0) } ?? "never")"
+                + " clock=\(node.gpu.smClockMHz.map { String(format: "%.0f", $0) } ?? "-")"
+                + " lock=\(node.clockLock?.label ?? "-")"
+                + " throttle=\(node.gpu.throttle?.label ?? "-")")
+            print("  fault mode=\(node.faultMode?.rawValue ?? "-") collective=\(node.collective)")
+            // Slow-probe inputs to the classifier, plus the per-section line counts:
+            // "the probe never saw that section" and "the box does not have it" look
+            // identical in the verdict, and only the counts tell them apart.
+            print("  probe cores=\(node.system.cpuCores.map(String.init) ?? "-")"
+                + " oom=\(node.system.kernelErrors.oomKills)"
+                + " kernelLog=\(node.system.kernelErrors.available)"
+                + " pcieLate=\(node.system.pcieLatePowerEvents.map(String.init) ?? "-")"
+                + " pcieBoot=\(node.system.pcieBootPowerEvents.map(String.init) ?? "-")"
+                + " driver=\(node.system.driverVersion ?? "-")")
+            print("  sections \(node.slowProbeSections.sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" }.joined(separator: " "))")
+            if let forensics = node.forensics {
+                print("  lastBoot verdict=\(forensics.verdict.rawValue) confident=\(forensics.confident)"
+                    + " markers=\(forensics.shutdownMarkers) panics=\(forensics.panicMarkers)"
+                    + " pstore=\(forensics.pstoreEntries.map(String.init) ?? "unreadable")")
+                print("    \(forensics.summary)")
+                if let ended = forensics.previousBootEndedAt {
+                    print("    prevBoot ended: \(ended)")
+                }
+            }
 
             // The inference row had two bugs that were invisible from the bar: a
             // headless rank showing a stranger's model, and a source picker

@@ -5,7 +5,7 @@ import Foundation
 /// 为什么整机瓦数必须建模：GB10 没有整机功率计。已实测——没有 RAPL
 /// （`/sys/class/powercap` 为空）、没有 hwmon 功率传感器、没有 IMC/RAPL、
 /// 没有 BMC，连 `nvidia-smi` 的 module power 都恒定返回 0。所以整机瓦数只能
-/// 由 GPU rail + CPU 占用建出来的 `estimateWatts` 给，模型公式就是唯一的真相。
+/// 由唯一的那套拟合模型（`PowerEstimate`：GPU 轨 + CPU 占用×频率）给出。
 ///
 /// 为什么按分钟桶积分而不是累计一个总 Wh：24 小时 / 31 天两个窗口都要能「滑窗」
 /// 查询，只存一个累计值就无法扣除过期部分。分钟桶（最多 44640 个）内存可忽略，
@@ -202,18 +202,18 @@ public struct EnergyLedger: Sendable, Codable {
     ///   cpuWatts = cpuIdleW + (cpuTdpW − cpuIdleW) × clamp(cpu%, 0, 100) / 100
     ///   watts    = clamp(gpuW + cpuWatts + peripheralW, 0, capW)
     /// gpuW 或 cpu% 为 nil → 返回 nil（不造数）。`+23 W` 是 CX7/网卡/盘等外设的固定底。
+    /// 整机瓦数：**只**走那一套模型（`PowerEstimate`），这里只是薄封装。
+    ///
+    /// 这里以前是第二套公式（`GPU + 5.2 + 59.8×CPU% + 23`，CPU 按 65W TDP），
+    /// 于是同一个时刻卡片上显示 148W、电费账本记 117W —— 两个数都叫"整机功耗"，
+    /// 只有一个能在设置里校准。现在两个消费者吃同一个读数。
     public static func estimateWatts(
         gpuW: Double?,
         cpuUsagePct: Double?,
-        cpuTdpW: Double = 65,
-        cpuIdleW: Double = 5.2,
-        peripheralW: Double = 23,
-        capW: Double = 240
+        cpuFreqRatio: Double? = nil,
+        model: PowerEstimate = PowerEstimate()
     ) -> Double? {
-        guard let gpuW, let cpuUsagePct else { return nil }
-        let pct = min(100, max(0, cpuUsagePct))
-        let cpuWatts = cpuIdleW + (cpuTdpW - cpuIdleW) * pct / 100
-        return min(max(gpuW + cpuWatts + peripheralW, 0), capW)
+        model.estimate(gpuW: gpuW, cpuUsagePct: cpuUsagePct, cpuFreqRatio: cpuFreqRatio)?.wallW
     }
 
     public func encoded() throws -> Data {

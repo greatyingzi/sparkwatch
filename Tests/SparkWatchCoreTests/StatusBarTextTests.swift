@@ -215,9 +215,9 @@ struct StatusBarTextTests {
             ),
             util: 96, power: 20, clock: 610
         )]
-        // 12 + 2.20×20 = 56 W: the wall draw rides along, since the compact
-        // preset always carries it.
-        #expect(text(fleet) == "⚠ ● 00 96% 20W ≈56W")
+        // 1.61×20 + 95×0.20 = 51.2 W: the wall draw rides along, since the
+        // compact preset always carries it.
+        #expect(text(fleet) == "⚠ ● 00 96% 20W ≈51W")
     }
 
     @Test func memoryWarningColoursTheDotAndStaysSilent() {
@@ -282,7 +282,7 @@ struct StatusBarTextTests {
             node(name: "spark-00", power: 13.3),
             node(name: "spark-01", power: 11.3),
         ]
-        // 12 + 2.20×13.3 = 41.3 and 12 + 2.20×11.3 = 36.9; summed = 78.1.
+        // 1.61×13.3 + 95×0.20 = 40.4 and 1.61×11.3 + 95×0.20 = 37.2; summed = 77.6.
         #expect(text(fleet) == "● ≈78W")
     }
 
@@ -292,8 +292,9 @@ struct StatusBarTextTests {
             node(name: "spark-01", power: 47.7),
         ]
         let bar = text(fleet) { $0.showPower = true }
-        // 12 + 2.20×11.8 = 38; 12 + 2.20×47.7 = 117; total 155.
-        #expect(bar == "● ≈155W")
+        // 1.61×11.8 = 19.0 and 1.61×47.7 = 76.8, plus the 20 %-CPU prior (19 W)
+        // each because these fixtures carry no CPU reading: 38.0 + 95.8 = 133.8.
+        #expect(bar == "● ≈134W")
     }
 
     /// No GPU rail reading → no number. An estimate built on nothing would be a
@@ -343,6 +344,7 @@ struct StatusBarTextTests {
             id: UUID(), name: "spark-01", host: "spark-01.local",
             source: .dashboard, gpu: gpu, system: system, health: report
         )]
-        #expect(text(fleet) == "⚠ ● 01 91° ≈210W")
+        // 1.61×90 + 95×0.20 = 163.9 (the fixture carries no CPU reading).
+        #expect(text(fleet) == "⚠ ● 01 91° ≈164W")
     }
 }

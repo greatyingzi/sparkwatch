@@ -173,7 +173,7 @@ struct EnergyPage: View {
     private var gpuShare: String {
         let gpu = model.nodes.reduce(0.0) { $0 + ($1.gpu.powerW ?? 0) }
         let whole = model.nodes.reduce(0.0) {
-            $0 + (model.powerEstimate.wholeMachineW(gpuW: $1.gpu.powerW) ?? 0)
+            $0 + ($1.power?.wallW ?? model.powerEstimate.wholeMachineW(gpuW: $1.gpu.powerW) ?? 0)
         }
         guard whole > 0 else { return "--" }
         return String(format: "%.0f%%", gpu / whole * 100)

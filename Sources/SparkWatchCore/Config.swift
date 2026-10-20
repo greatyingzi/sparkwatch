@@ -14,6 +14,14 @@ import Foundation
 /// reliable store for unsigned local builds. Still never the password.
 public struct SettingsStore: Sendable {
     public static let directory: URL = {
+        // `SPARKWATCH_HOME` redirects every store (settings, sessions, ledgers) so a
+        // diagnostic run can exercise the real pipeline against the real boxes
+        // without touching the installed app's state — the two instances share no
+        // files and, with their own `dashboardLocalPort`, no SSH forwards either.
+        // This is what makes `--print-status` usable while the menu-bar app is up.
+        if let override = ProcessInfo.processInfo.environment["SPARKWATCH_HOME"], !override.isEmpty {
+            return URL(fileURLWithPath: override, isDirectory: true)
+        }
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first ?? URL(fileURLWithPath: NSHomeDirectory())
         return base.appending(path: "SparkWatch", directoryHint: .isDirectory)

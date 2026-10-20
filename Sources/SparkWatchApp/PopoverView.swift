@@ -356,7 +356,8 @@ struct NodeCard: View {
                 // no on-box whole-machine number exists on GB10.
                 StatCell(
                     key: "整机≈功耗",
-                    value: powerEstimate.wholeMachineW(gpuW: snapshot.gpu.powerW)
+                    value: (snapshot.power?.wallW
+                        ?? powerEstimate.wholeMachineW(gpuW: snapshot.gpu.powerW))
                         .map { String(format: "≈%.0f W", $0) } ?? "--"
                 )
                 // GB10 exposes no CPU package sensor; the honest number is the

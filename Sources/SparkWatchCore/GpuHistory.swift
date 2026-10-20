@@ -14,12 +14,26 @@ public struct GpuHistory: Sendable, Codable {
         public var utilPct: Double?
         public var powerW: Double?
         public var tempC: Double?
+        /// Hottest ACPI zone at that moment. This is the number a Spark actually
+        /// shuts down on, and it reads 8–15 °C above the GPU rail — the last
+        /// sample before a documented hard power-off was 92.2 °C here versus
+        /// 84 °C from `nvidia-smi`. Stored so a power-off leaves evidence behind
+        /// on this Mac, which is the only place it can survive.
+        public var acpitzC: Double?
+        /// SM clock. Together with power and utilisation it is what separates a
+        /// real wedge from a tensor-parallel rank waiting on its peer.
+        public var smClockMHz: Double?
 
-        public init(at: Date, utilPct: Double?, powerW: Double?, tempC: Double?) {
+        public init(
+            at: Date, utilPct: Double?, powerW: Double?, tempC: Double?,
+            acpitzC: Double? = nil, smClockMHz: Double? = nil
+        ) {
             self.at = at
             self.utilPct = utilPct
             self.powerW = powerW
             self.tempC = tempC
+            self.acpitzC = acpitzC
+            self.smClockMHz = smClockMHz
         }
     }
 

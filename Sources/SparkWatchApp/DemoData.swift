@@ -106,6 +106,46 @@ enum DemoData {
                 node.gpu = gpu(util: 0, temp: 34, powerW: 11.0, usedPct: 8)
                 node.health = HealthReport(level: .unknown, reasons: [])
             }
+
+            // The derived layer production fills in `NodeRuntime.snapshot()`. Doing
+            // it here too keeps previews honest: a layout that shows a thermal trend
+            // or a fault chip must be reviewable without a real incident.
+            let model = PowerEstimate()
+            node.power = model.estimate(gpuW: node.gpu.powerW, cpuUsagePct: node.system.cpuUsagePct)
+            node.faultMode = node.health.faultMode
+            node.collective = index % 8 < 2
+            switch index % 8 {
+            case 0, 1:
+                node.clockLock = .unlocked
+                node.thermalTrend = ThermalTrend.Reading(
+                    slopePerMinute: 0.3 + Double(index) * 0.2, spanSeconds: 180, deltaC: 1.1
+                )
+                node.forensics = BootForensics(
+                    verdict: .powerLossSuspected, confident: true,
+                    summary: "上次启动的日志停在「systemd-journald: Under memory pressure」，随后没有干净关机标记且 pstore 为空 → 疑似硬断电或被强杀。"
+                )
+                node.forensics?.previousBootTail = ["Oct 06 05:17:24 dgx-spark-00 systemd-journald[606]: Under memory pressure, flushing caches."]
+                node.fastSampleAge = 1.6
+            case 4:
+                // The documented power-off recipe: 92 → 96 °C while climbing.
+                node.clockLock = .unknown
+                node.thermalTrend = ThermalTrend.Reading(slopePerMinute: 1.5, spanSeconds: 150, deltaC: 3.8)
+                node.system.cpuTempC = 95
+                node.faultMode = .clockCollapse
+                node.fastSampleAge = 2.1
+                node.forensics = BootForensics(
+                    verdict: .powerLossSuspected, confident: false,
+                    summary: "上次启动的日志在行中间中断，pstore 不可读（需要 root）→ 疑似硬断电，证据不完整。"
+                )
+            case 5:
+                node.fastSampleAge = nil
+            default:
+                node.clockLock = .unknown
+                node.fastSampleAge = 2.0
+                node.forensics = BootForensics(
+                    verdict: .cleanShutdown, confident: true, summary: "上次关机写了干净关机标记（3 条），不是断电。"
+                )
+            }
             return node
         }
     }
@@ -151,6 +191,15 @@ enum DemoData {
         sample.swapFreeBytes = 16_106_127_360
         sample.cpuUsagePct = cpu
         sample.cpuCores = 20
+        // Real GB10 values, so a preview exercises the same thresholds as production:
+        // two cpufreq policies (3.9 GHz + 2.808 GHz), a 104.8 °C trip point, the
+        // 580.x driver, and the four boot-time PCIe power lines every box logs.
+        sample.cpuFreqMHz = 3_354
+        sample.cpuFreqMaxMHz = 3_900
+        sample.thermalLimitC = 104.8
+        sample.driverVersion = "580.178.04"
+        sample.pcieBootPowerEvents = 4
+        sample.pcieLatePowerEvents = 0
         sample.cpuTempC = 54
         sample.load1 = load
         sample.uptimeSeconds = days * 86_400
@@ -164,6 +213,8 @@ enum DemoData {
         sample.utilPct = util
         sample.tempC = temp
         sample.powerW = powerW
+        sample.smClockMHz = util > 50 ? 2_463 : 2_411
+        sample.powerInstantW = powerW
         sample.memTotalBytes = 130_660_913_152
         sample.memUsedBytes = UInt64(130_660_913_152 * usedPct / 100)
         return sample

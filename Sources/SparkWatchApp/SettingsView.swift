@@ -277,28 +277,48 @@ struct SettingsView: View {
                         Text("整机 ≈")
                             .font(.system(size: 10.5))
                             .foregroundStyle(.secondary)
-                        TextField("", value: $model.settings.powerEstimate.baseW, format: .number.precision(.fractionLength(0)))
+                        TextField("", value: $model.settings.powerEstimate.kGpu, format: .number.precision(.fractionLength(2)))
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 56)
-                        Text("W +")
+                        Text("× GPU 轨 +")
                             .font(.system(size: 10.5))
                             .foregroundStyle(.secondary)
-                        TextField("", value: $model.settings.powerEstimate.perGpuW, format: .number.precision(.fractionLength(2)))
+                        TextField("", value: $model.settings.powerEstimate.kCpu, format: .number.precision(.fractionLength(0)))
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 56)
-                        Text("× GPU 功耗")
+                        Text("× CPU 满载比例")
                             .font(.system(size: 10.5))
                             .foregroundStyle(.secondary)
                         Button("恢复默认") {
-                            model.settings.powerEstimate.baseW = 12
-                            model.settings.powerEstimate.perGpuW = 2.20
+                            model.settings.powerEstimate.kGpu = 1.61
+                            model.settings.powerEstimate.kCpu = 95
+                            model.settings.powerEstimate.floorW = 20
+                            model.settings.powerEstimate.capW = 200
+                            model.settings.powerEstimate.calibration = .report
                         }
                         .controlSize(.small)
                         Spacer()
                         Button("安装功率计后可自行校准") {}
                             .controlSize(.small)
                             .disabled(true)
-                            .help("默认系数由两个墙上功率计实测锚点解出：空闲 GPU 11.8W→整机 38W；生成时 GPU 47.7W→每台 117W（双机 234W/2）")
+                            .help("默认系数由公开的墙上功率计锚点约束拟合解出（2026 固件）：空载 GPU 11W→22–25W；MoE 解码 15W→45W；推理典型 35.7W→60–90W；双机 TP 对 47.7W→117W；CPU 满载 12W→120–130W；GPU 满载 87W→170W。锚点上最大残差 10.9W。")
+                    }
+                }
+                LabeledRow("上下限") {
+                    HStack(spacing: 8) {
+                        TextField("", value: $model.settings.powerEstimate.floorW, format: .number.precision(.fractionLength(0)))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 56)
+                        Text("W 下限（当前固件空载 22–25W）·")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.secondary)
+                        TextField("", value: $model.settings.powerEstimate.capW, format: .number.precision(.fractionLength(0)))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 56)
+                        Text("W 上限（实测天花板 ~200W，240W 只是适配器额定）")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.secondary)
+                        Spacer()
                     }
                 }
                 LabeledRow("显示平滑") {

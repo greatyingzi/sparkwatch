@@ -133,7 +133,9 @@ public enum StatusBarText {
             }
         }
         if flags.showPower {
-            let known = visible.compactMap { powerEstimate.wholeMachineW(gpuW: $0.gpu.powerW) }
+            let known = visible.compactMap {
+                $0.power?.wallW ?? powerEstimate.wholeMachineW(gpuW: $0.gpu.powerW)
+            }
             if !known.isEmpty {
                 out.append(StatusSegment(String(format: "≈%.0fW", known.reduce(0, +))))
             }
@@ -328,6 +330,20 @@ public enum StatusBarText {
             let util = snapshot.gpu.utilPct.map { String(format: "%.0f%%", $0) } ?? "忙"
             let power = snapshot.gpu.powerW.map { String(format: "%.0fW", $0) } ?? "低功耗"
             return "\(util) \(power)"
+        }
+        // A named hardware signature beats a number here, because each mode has a
+        // different next action (RMA / lock / driver upgrade). The wedge above is
+        // the exception: its numbers are the evidence, so it keeps them.
+        if causes.contains(.faultMode), let mode = snapshot.health.faultMode {
+            return mode.token
+        }
+        // Climbing toward the trip point: the only thermal signal that can arrive
+        // before this hardware cuts its own power.
+        if causes.contains(.thermalTrend) {
+            if let trend = snapshot.thermalTrend {
+                return String(format: "热↗%.1f°/min", trend.slopePerMinute)
+            }
+            return "热↗"
         }
         // Thermals: the GPU rail first (that is the one GB10 cannot self-limit),
         // then the ACPI zone the box actually throttles on.

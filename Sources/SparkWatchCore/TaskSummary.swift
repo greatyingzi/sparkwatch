@@ -77,7 +77,7 @@ public enum TaskSummary {
         powerEstimate: PowerEstimate
     ) -> Double? {
         let values = nodes(of: task, in: snapshots)
-            .compactMap { powerEstimate.wholeMachineW(gpuW: $0.gpu.powerW) }
+            .compactMap { $0.power?.wallW ?? powerEstimate.wholeMachineW(gpuW: $0.gpu.powerW) }
         guard !values.isEmpty else { return nil }
         return values.reduce(0, +)
     }

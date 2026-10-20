@@ -438,7 +438,7 @@ struct OverviewPage: View {
 
     private var fleetWatts: Double {
         model.nodes.reduce(0) { total, node in
-            total + (model.powerEstimate.wholeMachineW(gpuW: node.gpu.powerW) ?? 0)
+            total + (node.power?.wallW ?? model.powerEstimate.wholeMachineW(gpuW: node.gpu.powerW) ?? 0)
         }
     }
 

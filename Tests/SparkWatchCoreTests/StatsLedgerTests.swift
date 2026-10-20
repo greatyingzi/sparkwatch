@@ -104,19 +104,33 @@ struct GpuHistoryTests {
 struct EnergyLedgerTests {
     private let base = Date(timeIntervalSince1970: 1_700_000_000)
 
-    /// 盖章值：gpu=0, cpu=0 → 空闲底 5.2 + 外设 23 = 28.2 W；满载按 TDP；超帽封顶。
-    @Test func estimateWattsAnchors() {
-        #expect(EnergyLedger.estimateWatts(gpuW: 0, cpuUsagePct: 0)! == 28.2)
-        #expect(EnergyLedger.estimateWatts(gpuW: 100, cpuUsagePct: 100)! == 188)   // 100+65+23
-        #expect(EnergyLedger.estimateWatts(gpuW: 200, cpuUsagePct: 100)! == 240)   // 288 → 封 240
-        // cpu% 超过 100 按 100 截断。
-        #expect(EnergyLedger.estimateWatts(gpuW: 0, cpuUsagePct: 150)! == 88)      // 65+23
+    /// 账本与卡片必须是同一个公式：这里只验它委派给了 `PowerEstimate`。
+    @Test func estimateWattsDelegatesToTheSingleModel() {
+        let model = PowerEstimate()
+        for gpu in [0.0, 11.0, 47.7, 87.0] {
+            for cpu in [0.0, 33.0, 100.0] {
+                #expect(
+                    EnergyLedger.estimateWatts(gpuW: gpu, cpuUsagePct: cpu)
+                        == model.estimate(gpuW: gpu, cpuUsagePct: cpu)?.wallW
+                )
+            }
+        }
+        // 锚点复核：空载落在 2026 固件的 22–25W 区间，而不是旧公式的 38W。
+        let idle = EnergyLedger.estimateWatts(gpuW: 11, cpuUsagePct: 3)!
+        #expect(idle >= 20 && idle <= 26)
+        // CPU 满载不再被低估（旧公式给 38W，实测 120–130W）。
+        let cpuHeavy = EnergyLedger.estimateWatts(gpuW: 12, cpuUsagePct: 100)!
+        #expect(cpuHeavy >= 100 && cpuHeavy <= 130)
     }
 
-    /// gpuW 或 cpu% 为 nil → nil，不造数。
-    @Test func estimateWattsNilWhenInputMissing() {
+    /// GPU 轨未知 → nil（不造数）。CPU 未知不再是 nil：整机仍然要记账，
+    /// 只是按 20% 的载入先验并标低置信。
+    @Test func estimateWattsWithoutInputs() {
         #expect(EnergyLedger.estimateWatts(gpuW: nil, cpuUsagePct: 50) == nil)
-        #expect(EnergyLedger.estimateWatts(gpuW: 10, cpuUsagePct: nil) == nil)
+        let reading = PowerEstimate().estimate(gpuW: 10, cpuUsagePct: nil)
+        #expect(reading != nil)
+        #expect(reading?.cpuAssumed == true)
+        #expect(reading?.confidence == .low)
     }
 
     /// 100 W 跑 60 分钟 = 100 Wh = 0.1 kWh。

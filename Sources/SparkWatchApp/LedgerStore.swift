@@ -57,7 +57,12 @@ final class LedgerStore {
 
     // MARK: - Recording
 
-    func record(nodes: [NodeSnapshot], tasks: [ClusterTask], at now: Date = Date()) {
+    func record(
+        nodes: [NodeSnapshot],
+        tasks: [ClusterTask],
+        power: PowerEstimate = PowerEstimate(),
+        at now: Date = Date()
+    ) {
         for node in nodes {
             let role = node.inference?.taskRole ?? ""
             // A headless rank of a distributed deployment answers no HTTP and
@@ -66,19 +71,30 @@ final class LedgerStore {
             let isWorker = role.contains("worker")
             let isServing = node.inference != nil && !isWorker
 
+            // The zone temperature and the SM clock go into the same ring as
+            // utilisation and power: after a hard power-off this Mac holds the only
+            // surviving copy of the last two minutes, and "it was climbing" is a
+            // claim that needs those two columns.
             history.record(
                 GpuHistory.Point(
                     at: now,
                     utilPct: node.gpu.utilPct,
                     powerW: node.gpu.powerW,
-                    tempC: node.gpu.tempC
+                    tempC: node.gpu.tempC,
+                    acpitzC: node.system.cpuTempC,
+                    smClockMHz: node.gpu.smClockMHz
                 ),
                 nodeID: node.id
             )
 
-            let watts = EnergyLedger.estimateWatts(
-                gpuW: node.gpu.powerW, cpuUsagePct: node.system.cpuUsagePct
-            )
+            // The pre-computed reading is the one every surface shows; recomputing
+            // here would let the ledger and the card drift apart again.
+            let watts = node.power?.wallW
+                ?? EnergyLedger.estimateWatts(
+                    gpuW: node.gpu.powerW,
+                    cpuUsagePct: node.system.cpuUsagePct,
+                    model: power
+                )
             energy.record(
                 nodeID: node.id,
                 at: now,

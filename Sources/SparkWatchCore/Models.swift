@@ -301,55 +301,13 @@ public struct StatusBarSettings: Codable, Sendable, Equatable {
     }
 }
 
-/// Whole-machine power estimate.
-///
-/// GB10 cannot measure its own wall draw (verified on the box, and an
-/// independent NVIDIA-forum audit confirms the Grace CPU rail is simply not
-/// instrumented: no INA chips, DCGM's CPU/Module power fields return 0.000), so
-/// the whole-machine figure has to be modelled from the one number that is
-/// real — the GPU rail.
-///
-/// Fit against two wall-meter anchors, not a guess: the slope and the floor are
-/// solved from a pair of (GPU rail, wall) measurements of a single Spark:
-///   idle, no model:      GPU 11.8 W  -> 38 W wall    (Kill-a-Watt, community)
-///   generating:          GPU 47.7 W  -> 117 W wall   (Shelly on a two-node
-///                                                      pair, 234 W / 2 boxes)
-/// => base 12.0 W, k 2.20.
-///
-/// The caveat that matters: this keys on the GPU rail alone, so a CPU-bound box
-/// that leaves the GPU idle will be under-read badly (the platform floor minus
-/// CPU work is only ~12 W). In an inference workload the CPU tracks the GPU
-/// closely, so the single-term fit is good there. Both coefficients are tunable
-/// in 设置 → 功耗, which is also where you correct them once a real power meter
-/// is in place.
-public struct PowerEstimate: Codable, Sendable, Equatable {
-    public var enabled: Bool = true
-    /// Fixed platform floor in watts (CPUs at idle, DRAM, NVMe, NIC, PSU loss).
-    public var baseW: Double = 12
-    /// Marginal watts per watt of GPU draw.
-    public var perGpuW: Double = 2.20
-    /// The 240 W USB-C adapter is the hard ceiling.
-    public var maxW: Double = 240
-
-    public init() {}
-
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
-        self.baseW = try container.decodeIfPresent(Double.self, forKey: .baseW) ?? 12
-        self.perGpuW = try container.decodeIfPresent(Double.self, forKey: .perGpuW) ?? 2.20
-        self.maxW = try container.decodeIfPresent(Double.self, forKey: .maxW) ?? 240
-    }
-
-    /// `nil` when disabled or when the GPU rail itself is unknown — an estimate
-    /// built on nothing would just be a made-up number.
-    public func wholeMachineW(gpuW: Double?) -> Double? {
-        guard enabled, let gpuW, gpuW >= 0 else { return nil }
-        return min(baseW + perGpuW * gpuW, maxW)
-    }
-}
+// `PowerEstimate` (whole-machine watts) lives in PowerModel.swift: one formula
+// for every surface — the cards, the menu bar, the fleet pages and the energy
+// ledger. It used to be defined here while the ledger carried a second, hard-coded
+// model of its own.
 
 public struct AppSettings: Codable, Sendable {
+
     /// Hardware stream cadence. The dashboard pushes at ~1 Hz; we sample slower.
     public var sampleIntervalSeconds: Double = 2
     /// The expensive channel (SSH: meminfo, disk, docker, pressure) cadence.
@@ -802,11 +760,28 @@ public struct SystemSample: Sendable, Equatable {
     /// hottest thermal zone (which is what a Spark actually throttles on).
     public var cpuUsagePct: Double?
     public var cpuTempC: Double?
+    /// Mean of the CPU policy clocks (GB10: 3.9 GHz performance cluster +
+    /// 2.808 GHz efficiency cluster). Used to weight the power model's CPU term:
+    /// dynamic power tracks clock, so 50 % busy at 2.8 GHz is not 50 % busy at
+    /// 3.9 GHz. Filled by the fast thermal stream, never by the slow probe.
+    public var cpuFreqMHz: Double?
+    public var cpuFreqMaxMHz: Double?
     /// The platform's own declared ceiling for that thermal zone (its ACPI trip
     /// point, 104 °C on GB10). Thresholds are computed *relative* to it: a fixed
     /// 90 °C line turned a normal load-time reading into a permanent ⚠, because
     /// the hardware itself considers 104 the limit.
     public var thermalLimitC: Double?
+    /// Kernel version of the running driver (`580.178.04`). Only used to decide
+    /// whether the 5 W low-power bug's advice ("upgrade to 580.x") makes sense.
+    public var driverVersion: String?
+    /// `insufficient power on the PCIe slot` events **more than 180 s after boot**.
+    ///
+    /// Every Spark here logs that line four times during boot (one per ConnectX-7
+    /// function) and then runs fine for weeks, so the boot-time burst is not
+    /// evidence of anything. A late occurrence — together with power pinned near
+    /// 30 W at 0 % utilisation — is the documented power-delivery defect.
+    public var pcieLatePowerEvents: Int?
+    public var pcieBootPowerEvents: Int?
     public var cpuCores: Int?
     public var containers: [ContainerInfo] = []
     /// Root block device throughput, from two `/sys/block/<dev>/stat` reads
@@ -900,6 +875,29 @@ public struct NodeSnapshot: Sendable, Identifiable {
     public var awaitingCredentials: Bool = false
     public var error: String?
     public var updatedAt: Date
+    /// Whole-machine power, from the single shared model (see `PowerEstimate`).
+    /// Computed where the CPU side and the topology are known, so every surface
+    /// prints the same number and the same confidence.
+    public var power: PowerEstimate.Reading?
+    /// Which documented failure signature this box currently matches, if any.
+    public var faultMode: FaultMode?
+    /// Whether a fixed clock appears to be in effect, and at what frequency.
+    public var clockLock: ClockLockState?
+    /// How fast the hottest ACPI zone is climbing, when there is enough data.
+    public var thermalTrend: ThermalTrend.Reading?
+    /// How the box stopped last time (clean shutdown vs suspected power cut).
+    public var forensics: BootForensics?
+    /// True when this node is a member of a multi-node (tensor-parallel) task.
+    /// The wall draw of a Spark in a collective is not the same function of its
+    /// GPU rail as a solo box's — the peer link keeps burning while a rank waits.
+    public var collective: Bool = false
+    /// Age of the newest sample from the 2 s thermal stream. Nil when the stream
+    /// never delivered one; grows while the stream is dead, which is the only
+    /// honest way to distinguish "steady temperature" from "no data".
+    public var fastSampleAge: TimeInterval?
+    /// Per-section line counts from the last slow SSH probe. Diagnostic only: it
+    /// answers "did the probe not see that section, or does the box not have it".
+    public var slowProbeSections: [String: Int] = [:]
 
     public init(
         id: UUID,
@@ -919,7 +917,15 @@ public struct NodeSnapshot: Sendable, Identifiable {
         health: HealthReport = HealthReport(level: .unknown, reasons: []),
         awaitingCredentials: Bool = false,
         error: String? = nil,
-        updatedAt: Date = Date()
+        updatedAt: Date = Date(),
+        power: PowerEstimate.Reading? = nil,
+        faultMode: FaultMode? = nil,
+        clockLock: ClockLockState? = nil,
+        thermalTrend: ThermalTrend.Reading? = nil,
+        forensics: BootForensics? = nil,
+        collective: Bool = false,
+        fastSampleAge: TimeInterval? = nil,
+        slowProbeSections: [String: Int] = [:]
     ) {
         self.id = id
         self.name = name
@@ -939,5 +945,14 @@ public struct NodeSnapshot: Sendable, Identifiable {
         self.awaitingCredentials = awaitingCredentials
         self.error = error
         self.updatedAt = updatedAt
+        self.power = power
+        self.faultMode = faultMode
+        self.clockLock = clockLock
+        self.thermalTrend = thermalTrend
+        self.forensics = forensics
+        self.collective = collective
+        self.fastSampleAge = fastSampleAge
+        self.slowProbeSections = slowProbeSections
     }
 }
+

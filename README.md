@@ -375,8 +375,8 @@ unified memory makes the original reading misleading.
 
 | level | fires when |
 | --- | --- |
-| **异常** (critical, ⚠) | node unreachable (both channels down) · GPU ≥ 90 °C · ACPI zone within **6 °C of the platform's declared limit** (104 °C here) · memory PSI `full avg10` > 0.25 · MemAvailable < 2 GB · MemAvailable < 8 GB **with** PSI > 0.25 · GPU busy ≥ 80 % **while drawing ≤ 25 W and the SM clock has collapsed to ≤ 800 MHz** for 3 consecutive samples (the documented low-power wedge) |
-| **注意** (warning) | GPU 85–90 °C · ACPI zone within 12 °C of the limit · PSI 0.10–0.25 · MemAvailable 8–16 GB · MemAvailable < 8 GB with PSI ≤ 0.25 (a resident model parking the floor — normal) · swap used > 8 GB · 1–2 low-draw samples · slow-channel error |
+| **异常** (critical, ⚠) | node unreachable (both channels down) · GPU ≥ 90 °C · ACPI zone within **6 °C of the platform's declared limit** (104 °C here) · **zone within 12 °C of the limit and still climbing** (≥0.5 °C/min over a 5-minute window) · memory PSI `full avg10` > 0.25 · MemAvailable < 2 GB · MemAvailable < 8 GB **with** PSI > 0.25 · GPU busy ≥ 80 % **while drawing ≤ 25 W and the SM clock has collapsed to ≤ 800 MHz** for 3 consecutive samples (the documented low-power wedge) · **a power-delivery or 5 W driver signature matched** |
+| **注意** (warning) | GPU 85–90 °C · ACPI zone within 12 °C of the limit · **zone within 22 °C and climbing** · thermal-limiting signature (not a defect: lock/airflow) · PSI 0.10–0.25 · MemAvailable 8–16 GB · MemAvailable < 8 GB with PSI ≤ 0.25 (a resident model parking the floor — normal) · swap used > 8 GB · 1–2 low-draw samples · slow-channel error |
 | **正常** | none of the above |
 
 The ⚠ in the menu bar is a separate flag: only the conditions a green dashboard
@@ -535,24 +535,42 @@ On the power numbers, also honestly: **two values, only one of them measured.**
   CPU cores for 15 s moves the GPU energy counter by exactly zero — the Grace CPU
   rail is simply not instrumented.
 
-- **整机≈功耗 — estimated, and labelled as such.** Solved from two wall-meter
-  anchors of a single Spark, `wall = 12 W + 2.20 × gpu`:
+- **整机≈功耗 — estimated, and labelled as such.** One formula, read by the
+  cards, the menu bar, the fleet pages and the energy ledger (kWh, Wh per output
+  token, cost) alike:
 
-  | state | GPU rail | wall | source |
+  `wall = clamp(1.61 × GPU rail + 95 × CPU load fraction, 20 W, 200 W)`
+
+  The CPU load fraction is utilisation × (current ÷ maximum clock) — dynamic power
+  tracks clock, and GB10 runs two clusters (3.9 GHz + 2.808 GHz) whose `cpufreq`
+  is readable. Neither bound is arbitrary: 20 W is the idle floor on current
+  firmware (after the ConnectX-7 hot-plug fix) and 200 W is the measured ceiling —
+  240 W is only the USB-C adapter's rating, which a wall meter never reaches.
+
+  The coefficients come from a constrained fit over published wall-meter anchors
+  (2026 firmware), not from two points:
+
+  | state | GPU rail | CPU load | wall |
   | --- | --- | --- | --- |
-  | idle, no model | 11.8 W | 38 W | Kill-a-Watt (community) |
-  | generating | 47.7 W | 117 W | Shelly, two-node pair = 234 W / 2 |
+  | idle (headless, fixed firmware) | 11 W | ~3 % | 22–25 W |
+  | MoE decode, steady | 15 W | ~20 % | ~45 W |
+  | LLM inference, typical | 35.7 W | ~30 % | 60–90 W |
+  | 2-node TP pair (Shelly) | 47.7 W | ~40 % | 117 W |
+  | CPU saturated (20 cores) | 12 W | 100 % | 120–130 W |
+  | GPU saturated (Vulkan) | 87 W | ~20 % | ~170 W |
 
-  Both anchors are reproduced by the shipped defaults, and the app prints `≈`
-  (and shows `--` when the GPU rail itself is unknown, rather than inventing a
-  number). Expect ±20 %: it keys on the GPU rail alone, so a CPU-bound box with an
-  idle GPU will read low. Both coefficients are editable in 设置 → 功耗 — correct
-  them there once you put a metering plug in front of the machine.
+  Worst-case residual over those anchors is 10.9 W (RMS 7.8 W) — that is the
+  ceiling of a software-only estimate, because the anchors come from different
+  machines and firmware. All three coefficients (GPU slope, CPU full-load watts,
+  floor/cap) live in 设置 → 功耗, and a one-off calibration against a metering plug
+  is a drop-in replacement for the defaults; the plug is not needed at runtime.
 
-  For scale, community wall measurements of one Spark: idle 25–45 W, single
-  inference burst 125–170 W, CPU-only full load 120–130 W, two-node uncapped
-  ~330 W vs ~234 W clock-capped at 1400 MHz. (The clock cap is worth knowing: it
-  costs ~3 % decode speed and saves ~90–100 W across a pair.)
+  Two honesty rules: **low confidence is stated** (CPU reading missing → 20 %
+  prior, GPU rail outside the anchored range, CPU-heavy corner), and hovering the
+  number shows the arithmetic (`≈1.61 × 35.1W + 95 × 10% = 66W`). The ledger and
+  the card consume the same reading — previously there were two formulas
+  (`12 + 2.20×GPU` and `GPU + CPU(65 W TDP) + 23`) that could disagree by 62 W,
+  and only one of them was editable.
 
 On the CPU numbers, honestly: GB10 exposes **no CPU package temperature sensor**.
 The card therefore shows the hottest ACPI thermal zone (`/sys/class/thermal`) and
@@ -595,6 +613,73 @@ number nobody can check against the instant it came from is just a nicer-looking
 lie. And the mean feeds every consumer, including the low-power-wedge rule, where
 "sustained" is exactly what a mean measures; the whole-machine estimate inherits
 it for free.
+
+## 2-second thermal telemetry, failure signatures, and off-box forensics
+
+This layer exists because of one concrete failure shape: under sustained load this
+box **hard power-offs** — measured SM clock falling 2450 → 1475 within ~150 s, the
+ACPI zone peaking at 96 °C, then power cut (journald stops mid-line, pstore empty,
+no watchdog). The same zone declares a 104.8 °C trip point, so an *absolute*
+"warn within 6 °C of the ceiling" line can never fire before the machine is
+already off; and healthy boxes live at 78–91 °C under sustained inference, so
+lowering the line lights a permanent ⚠ on a good machine.
+
+Three pieces therefore ship together:
+
+1. **A 2-second thermal stream.** One standing SSH session runs a read-only loop on
+   the box (nothing installed, nothing written, the process dies with the
+   connection) and emits one line every 2 s: hottest `acpitz` + its trip point,
+   `nvidia-smi` power/utilisation/temperature/SM clock/throttle bits, `/proc/stat`
+   and `cpufreq`. Not a faster poll: a fresh `ssh` costs **1.27 s** on this tailnet
+   (measured, 5 calls = 6.37 s), while a standing stream costs zero round trips and
+   ~30 bytes per sample. And it must be shipped off-box, because the box's own log
+   dies with the power — **this Mac is the only surviving recorder**.
+   The `acpitz` versus `nvidia-smi` gap is real and large (measured 88.9 °C zone vs
+   79 °C smi; the last sample before a documented cutoff was 92.2 °C zone vs 84 °C
+   smi), so heat can only be judged on the zone column.
+2. **Trend-based thermal alerting.** A least-squares slope over a 5-minute window
+   (needs ≥90 s of data): within 22 °C of the ceiling *and still climbing* → 注意;
+   within 12 °C *and climbing* → 异常. The absolute thresholds stay, but stop being
+   the only evidence.
+3. **Power-off forensics.** When the boot id changes (or uptime goes backwards),
+   read the previous boot's journal (`journalctl -b -1`) and answer with evidence:
+   a clean shutdown marker → normal; a pstore dump → kernel crash; panic/lockup lines
+   → watchdog; a log that simply stops without any marker → **suspected hard
+   power-off or hard kill** (indistinguishable in the log, hence "suspected");
+   unreadable/rotated → undetermined. pstore needs root, so "could not read" is
+   reported as missing evidence and never as "clean".
+
+Three things measurement taught: a full `journalctl -b -1` scan costs **21 s** on
+this box (762 k lines), so only tail-bounded `-n` queries are used (~2 s); `tr`
+eats the trailing newline, so the next `echo` lands on the same line and silently
+merges two sections (the PCIe counters were swallowed by `cpufreq` until
+`--print-status` started printing per-section line counts); and a read-only probe
+must distinguish "did not see it" from "the box does not have it", or a verdict
+turns optimistic for free.
+
+### Four failure signatures, four different actions
+
+| signature | evidence | action |
+| --- | --- | --- |
+| low-power wedge | util ≥ 80 %, power ≤ 25 W, SM clock ≤ 800 MHz, 3 samples in a row | power-drain and reboot |
+| power-delivery defect | GPU rail pinned at 27–30 W at util ≈ 0 **and** `insufficient power on the PCIe slot` after the first 3 minutes | RMA |
+| thermal limiting (not a defect) | thermal-slowdown bit set, util ≥ 40 %, power ≥ 55 W | clock lock / airflow / stand it upright |
+| 5 W driver bug | power ≤ 8 W at util ≈ 0 with a clean kernel log, **and driver < 580** | upgrade to 580.x |
+
+The "after the first 3 minutes" gate is load-bearing: **every** healthy Spark in
+this fleet logs four of those PCIe power lines during boot (one per ConnectX-7
+function, same second) and then runs for weeks. A rule keyed on the raw dmesg line
+would send healthy hardware to RMA, so the boot burst is counted separately and
+never used as evidence.
+
+### Clock-lock state (inferred, never read back)
+
+`nvidia-smi` does not report a lock (`Applications`/`Max Clocks` stay 2418/3003),
+so the state is inferred from load-time samples: a 2200 MHz lock shows a flat
+2164–2184 MHz band (±40 MHz), an unlocked box boosts to 2400+. Anything in between,
+or a thermally throttled box, is reported as unknown rather than guessed. The point
+is that a lock **does not survive a reboot** — "I locked it last week" is a belief
+that can be falsified.
 
 ## Multi-machine tasks
 

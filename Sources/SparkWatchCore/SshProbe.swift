@@ -21,6 +21,20 @@ public enum SshProbe {
     echo '##docker'; docker ps --format '{{.Names}}|{{.Image}}|{{.Ports}}' 2>/dev/null || true
     echo '##gpu'; nvidia-smi --query-gpu=utilization.gpu,temperature.gpu,power.draw,power.limit,clocks.current.sm,clocks.max.sm,clocks_throttle_reasons.hw_thermal_slowdown,clocks_throttle_reasons.sw_thermal_slowdown,clocks_throttle_reasons.hw_slowdown,clocks_throttle_reasons.sw_power_cap --format=csv,noheader,nounits 2>/dev/null || true
     echo '##gpuapps'; nvidia-smi --query-compute-apps=pid,process_name,used_gpu_memory --format=csv,noheader,nounits 2>/dev/null || true
+    echo '##driver'; nvidia-smi --query-gpu=driver_version --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' '
+    # `tr` eats the final newline, so the next echo would land on this same line and
+    # silently merge two sections (the PCIe counters were swallowed by `cpufreq`
+    # until this trailing echo was added — found via the section:line dump).
+    echo '##cpufreq'; cat /sys/devices/system/cpu/cpufreq/policy*/scaling_cur_freq 2>/dev/null | tr '\\n' ' '; echo
+    echo '##pciepower'
+    # `insufficient power on the PCIe slot` is logged by mlx5 for every
+    # ConnectX-7 function during boot on a *healthy* Spark (four lines, same
+    # second, observed on both boxes here). Only a *late* occurrence means the
+    # power-delivery defect, so the boot-time burst is counted separately and
+    # never used as evidence.
+    __b=$(($(date +%s) - $(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)))
+    echo "late $(journalctl -k -b --no-pager -o short-unix 2>/dev/null | grep -i 'insufficient power on the PCIe slot' | awk -v b=$__b '$1+0 > b+180' | wc -l | tr -d ' ')"
+    echo "all $(journalctl -k -b --no-pager 2>/dev/null | grep -ci 'insufficient power on the PCIe slot' || true)"
     echo '##kernel'
     k=""
     if dmesg >/dev/null 2>&1; then k=$(dmesg 2>/dev/null)
@@ -59,6 +73,9 @@ public enum SshProbe {
         /// Listening sockets, as "bind:port" — the raw material for the
         /// inference-service picker.
         public var listeners: [(bind: String, port: Int)] = []
+        /// Per-section line counts, so "the probe did not see it" can be told
+        /// apart from "the box does not have it" from a dump alone.
+        public var sectionLines: [String: Int] = [:]
     }
 
     public static func collect(
@@ -90,12 +107,15 @@ public enum SshProbe {
         // produced "no tailnet" for every real node — caught by the fixture test.)
         var tailnetLines: [String] = []
 
+        var sectionLines: [String: Int] = [:]
         for line in text.split(whereSeparator: \.isNewline) {
             let line = String(line)
             if line.hasPrefix("##") {
                 section = String(line.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+                sectionLines[section, default: 0] += 0
                 continue
             }
+            sectionLines[section, default: 0] += 1
             switch section {
             case "meminfo":
                 // "MemTotal:       127598548 kB"
@@ -210,6 +230,25 @@ public enum SshProbe {
                 default: break
                 }
                 system.kernelErrors = errors
+            case "pciepower":
+                // "late 0" / "all 4" — see the script comment: the boot-time burst
+                // is normal on this hardware and must never escalate a box.
+                let fields = line.split(separator: " ").map(String.init)
+                guard fields.count >= 2, let count = Int(fields[1]) else { continue }
+                switch fields[0] {
+                case "late": system.pcieLatePowerEvents = count
+                case "all": system.pcieBootPowerEvents = count
+                default: break
+                }
+            case "driver":
+                let value = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !value.isEmpty, value != "[N/A]" { system.driverVersion = value }
+            case "cpufreq":
+                let freqs = line.split(separator: " ").compactMap { Double($0) }
+                if !freqs.isEmpty {
+                    system.cpuFreqMHz = freqs.reduce(0, +) / Double(freqs.count) / 1000
+                    system.cpuFreqMaxMHz = ThermalStreamParser.maxFreqMHz
+                }
             case "netmeta":
                 // "enP7s7|up|1000|192.168.1.60/24"
                 let fields = line.split(separator: "|", omittingEmptySubsequences: false).map {
@@ -301,7 +340,8 @@ public enum SshProbe {
             gpu: gpu,
             smClockMHz: clock,
             processes: InferenceProcessParser.parse(lines: processLines),
-            listeners: listeners
+            listeners: listeners,
+            sectionLines: sectionLines
         )
     }
 

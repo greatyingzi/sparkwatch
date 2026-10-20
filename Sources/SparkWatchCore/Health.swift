@@ -55,10 +55,17 @@ public enum HealthCause: String, Sendable, Equatable {
     case engineStalled
     case gpuThermal
     case cpuThermal
+    /// The hottest ACPI zone is *climbing* toward its trip point, before it is
+    /// close enough for the absolute rule to fire. This is the only warning that
+    /// can arrive before the documented hard power-off (the box dies at ~96 °C
+    /// while its declared trip point is 104.8 °C).
+    case thermalTrend
     case memoryPressure
     case memoryLow
     case swap
     case lowPowerWedge
+    /// A documented hardware/software failure signature (see `FaultMode`).
+    case faultMode
     /// The official telemetry channel is off because no one has signed in.
     case needsLogin
     /// A failure with no structured rule behind it (e.g. a probe error).
@@ -76,28 +83,38 @@ public struct HealthReport: Sendable, Equatable {
     /// a coloured dot and in the popover — a node that is doing its job must not
     /// sit in permanent alarm.
     public var alert: Bool
+    /// Which documented failure signature matched, for the UI chip and for the
+    /// operator's next action. Nil when nothing matched.
+    public var faultMode: FaultMode?
 
     public init(
         level: HealthLevel,
         reasons: [String],
         causes: [HealthCause] = [],
-        alert: Bool = false
+        alert: Bool = false,
+        faultMode: FaultMode? = nil
     ) {
         self.level = level
         self.reasons = reasons
         self.causes = causes
         self.alert = alert
+        self.faultMode = faultMode
     }
 
     public static let unknown = HealthReport(level: .unknown, reasons: [])
     public static let ok = HealthReport(level: .ok, reasons: [])
 }
 
-/// Stateful because the low-draw rule needs consecutive samples, not one.
+/// Stateful because the low-draw rule needs consecutive samples, not one, and the
+/// thermal rule needs a short history to compute a slope.
 public struct HealthEvaluator: Sendable {
     private var lowDrawStreak = 0
+    private var thermalTrend = ThermalTrend()
 
     public init() {}
+
+    /// The slope the evaluator last computed, for the UI's "热区在爬升" row.
+    public var lastThermalTrend: ThermalTrend.Reading? { thermalTrend.latest }
 
     public mutating func evaluate(
         gpu: GpuSample,
@@ -105,7 +122,8 @@ public struct HealthEvaluator: Sendable {
         source: DataSource,
         error: String?,
         inference: InferenceSample? = nil,
-        awaitingCredentials: Bool = false
+        awaitingCredentials: Bool = false,
+        at now: Date = Date()
     ) -> HealthReport {
         guard source != .down else {
             return HealthReport(
@@ -120,6 +138,7 @@ public struct HealthEvaluator: Sendable {
         var reasons: [String] = []
         var causes: [HealthCause] = []
         var alert = false
+        var faultMode: FaultMode?
 
         func flag(_ candidate: HealthLevel, _ reason: String, cause: HealthCause, alerting: Bool = false) {
             if candidate > level { level = candidate }
@@ -148,15 +167,33 @@ public struct HealthEvaluator: Sendable {
         // Warn within 12 °C of the ceiling, alert within 6 °C.
         if let cpuTemp = system.cpuTempC {
             let limit = system.thermalLimitC ?? 100
-            if cpuTemp >= limit - 6 {
+            let margin = limit - cpuTemp
+            // Slope over the last few minutes. This is what can arrive *before*
+            // the trip point: the published crash curve climbs 92 → 96 °C in
+            // ~150 s and the box then cuts power, i.e. 1.5 °C/min. Waiting for
+            // the absolute line at 12 °C of margin means hearing about it one
+            // sample before it dies.
+            let trend = thermalTrend.update(at: now, tempC: cpuTemp)
+            let climbing = (trend?.slopePerMinute ?? 0) >= 0.5 && (trend?.deltaC ?? 0) >= 2
+
+            if margin <= 6 {
                 flag(.critical,
                      String(format: "热区温度 %.0f°C（平台上限 %.0f°C）", cpuTemp, limit),
                      cause: .cpuThermal,
                      alerting: true)
-            } else if cpuTemp >= limit - 12 {
+            } else if margin <= 12 {
+                // Climbing while this close to the ceiling is the documented
+                // power-off recipe, not a warning to check later.
+                flag(climbing ? .critical : .warning,
+                     String(format: "热区温度 %.0f°C（平台上限 %.0f°C）", cpuTemp, limit)
+                        + (climbing ? String(format: "，仍在爬升 %+.1f°C/min", trend?.slopePerMinute ?? 0) : ""),
+                     cause: climbing ? .thermalTrend : .cpuThermal,
+                     alerting: climbing)
+            } else if margin <= 22, climbing {
                 flag(.warning,
-                     String(format: "热区温度 %.0f°C（平台上限 %.0f°C）", cpuTemp, limit),
-                     cause: .cpuThermal)
+                     String(format: "热区在爬升 %+.1f°C/min（%.0f°C，距上限 %.0f°C）",
+                            trend?.slopePerMinute ?? 0, cpuTemp, margin),
+                     cause: .thermalTrend)
             }
         }
 
@@ -230,10 +267,33 @@ public struct HealthEvaluator: Sendable {
                     cause: .lowPowerWedge,
                     alerting: true
                 )
+                faultMode = .clockCollapse
             } else if lowDrawStreak > 0 {
                 flag(.warning, String(format: "GPU 忙 %.0f%% 但功耗仅 %.1f W，时钟 %.0f MHz", util, power, clock ?? 0),
                      cause: .lowPowerWedge)
             }
+        }
+
+        // The remaining documented failure signatures: power-delivery defect,
+        // thermal limiting, the 5 W driver bug. Each has a different action, which
+        // is the only reason to tell them apart — see `FaultMode`.
+        if let verdict = FaultModeClassifier.classifyHardware(
+            utilPct: gpu.utilPct,
+            powerW: gpu.powerW,
+            gpuTempC: gpu.tempC,
+            acpitzC: system.cpuTempC,
+            thermalLimitC: system.thermalLimitC,
+            thermalSlowdown: gpu.throttle?.thermal ?? false,
+            pcieLatePowerEvents: system.pcieLatePowerEvents,
+            driverVersion: system.driverVersion
+        ), faultMode == nil {
+            faultMode = verdict.mode
+            flag(
+                verdict.critical ? .critical : .warning,
+                verdict.message + " → " + verdict.mode.action,
+                cause: .faultMode,
+                alerting: verdict.critical
+            )
         }
 
         // The official telemetry channel is off because nobody has signed in.
@@ -276,6 +336,9 @@ public struct HealthEvaluator: Sendable {
                 )
             }
         }
-        return HealthReport(level: level, reasons: reasons, causes: causes, alert: alert)
+        return HealthReport(
+            level: level, reasons: reasons, causes: causes, alert: alert, faultMode: faultMode
+        )
     }
 }
+

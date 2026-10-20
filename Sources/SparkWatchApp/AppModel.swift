@@ -160,7 +160,7 @@ final class AppModel: ObservableObject {
         lastUpdate = Date()
         // Feed the time series from what the collector already produced — no extra
         // traffic on the boxes.
-        ledgers.record(nodes: snapshots, tasks: tasks)
+        ledgers.record(nodes: snapshots, tasks: tasks, power: powerEstimate)
         mirrorLedgers()
         for snapshot in snapshots {
             var entry = history[snapshot.id] ?? History()

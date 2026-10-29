@@ -270,7 +270,8 @@ What genuinely helps more than money:
 
 - **A bug report with the specific behaviour** — which engine, which readout,
   what it said versus what you expected. Nearly everything in
-  [Traps](#traps-worth-knowing) came from one of those.
+  [Traps](#traps-worth-knowing) came from one of those. Reports go in
+  [issues](https://github.com/greatyingzi/sparkwatch/issues/new/choose).
 - **A run against hardware I do not have.** SGLang, TGI, ROCm, a non-DGX Linux
   box: the adapters are written from protocol facts and endpoint captures, so a
   real machine is the difference between "parses the payload" and "supported".

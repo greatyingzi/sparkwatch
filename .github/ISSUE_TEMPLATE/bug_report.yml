@@ -1,0 +1,65 @@
+name: Bug report
+description: A readout is wrong, a machine never appears, or the app misbehaves.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Most "wrong number" reports come down to which channel produced it, so the
+        fields below ask for both sides: what the dashboard says, and what the box
+        itself says.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What the app shows, and what you expected instead. A screenshot is fine when the layout itself is the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: both-sides
+    attributes:
+      label: Dashboard versus the box
+      description: "What the app reads, next to what the machine reports for the same thing — a `curl` of the serving endpoint, `nvidia-smi`, `tailscale status --json`."
+      render: console
+    validations:
+      required: true
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Inference engine behind it
+      options:
+        - vLLM
+        - SGLang
+        - llama.cpp
+        - TGI
+        - None, or no inference service on that box
+        - Other (say which below)
+    validations:
+      required: true
+  - type: input
+    id: machine
+    attributes:
+      label: Machine
+      description: "DGX Spark (GB10), or something else? `uname -sm`, and on GB10 `nvidia-smi --query-gpu=name --format=csv`."
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: SparkWatch version and macOS version
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How it was installed
+      options:
+        - Homebrew cask
+        - Release DMG
+        - Installer script
+        - Built from source
+  - type: textarea
+    id: logs
+    attributes:
+      label: Anything from Console.app
+      description: Optional. Filter for `SparkWatch` around the time the problem happened.

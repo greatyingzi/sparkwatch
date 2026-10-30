@@ -46,6 +46,20 @@ SCENARIOS = {
     "all_500":         dict(comp_step=0,    prompt_step=0,     pf=0, dec=0, fatal=0, stalled=0, lag=0, all_status=500),
     "timeout":         dict(comp_step=0,    prompt_step=0,     pf=0, dec=0, fatal=0, stalled=0, lag=0, sleep=30),
     "empty":           dict(comp_step=0,    prompt_step=0,     pf=0, dec=0, fatal=0, stalled=0, lag=0, empty_models=True),
+    # ---- 当前 build（2026-10+）的真实形状 ----
+    # /health 只给 live 实时态（没有任何计数器）；/metrics 的 *_total 只在"请求结束"那一拍
+    # 发布，中间靠 generation_tokens_running 这个 gauge 反映进度。客户的 TensorFold 就是
+    # 这样：11.2 秒的请求里计数器一次没动，结束时 +400。旧算法在这条轨迹上会读 0，
+    # 然后在边界拍冒充 ~200 tok/s —— 这两个数字都必须能在 mock 上复现。
+    "new_build_decoding": dict(comp_step=0, prompt_step=0, pf=0, dec=1, fatal=0, stalled=0, lag=0,
+                               shape="new_live", live_dec=25.0, live_pre=0.0,
+                               gauge_step=25, boundary_every=4, boundary_tokens=300),
+    "new_build_prefill":  dict(comp_step=0, prompt_step=0, pf=1, dec=0, fatal=0, stalled=0, lag=0,
+                               shape="new_live", live_dec=0.0, live_pre=900.0,
+                               gauge_step=0, boundary_every=4, boundary_tokens=0),
+    "new_build_idle":     dict(comp_step=0, prompt_step=0, pf=0, dec=0, fatal=0, stalled=0, lag=0,
+                               shape="new_live", live_dec=0.0, live_pre=0.0,
+                               gauge_step=0, boundary_every=4, boundary_tokens=0),
     # ---- 别的引擎形状（防止只认 TensorFold）----
     "vllm_style":      dict(kind="vllm"),
     "llamacpp_style":  dict(kind="llamacpp"),
@@ -170,6 +184,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def health(self):
         comp, prompt, spec = self.totals()
+        if spec.get("shape") == "new_live":
+            # 与客户机逐键一致的形状（没有任何计数器）。
+            return {
+                "status": "ok", "model": "dgx-spark", "model_ids": ["dgx-spark"],
+                "max_batch_size": 8, "warming": False, "memory": {},
+                "live": {"connections": spec["pf"] + spec["dec"], "waiting": 0,
+                         "decode_tokens_per_second": spec.get("live_dec", 0.0),
+                         "prefill_tokens_per_second": spec.get("live_pre", 0.0)},
+            }
         return {
             "ok": True, "backend": "tensorfold", "busy": bool(spec["pf"] or spec["dec"]),
             "requests_running": spec["pf"] + spec["dec"], "requests_total": 42,
@@ -192,6 +215,27 @@ class Handler(BaseHTTPRequestHandler):
         with LOCK:
             spec = dict(SCENARIOS[STATE["scenario"]])
             tick = STATE["tick"]
+        if spec.get("shape") == "new_live":
+            # 一个"请求周期"= boundary_every 拍：周期内 *_total 冻结、gauge 线性增长；
+            # 周期末 *_total 一次性 +boundary_tokens、gauge 归零 —— 真机边界发布的形状。
+            every = max(1, int(spec.get("boundary_every", 4)))
+            inside = tick % every
+            boundaries = tick // every
+            tokens = int(spec.get("boundary_tokens", 0))
+            gauge = int(spec.get("gauge_step", 0)) * inside
+            decode_sum = 500.0 + boundaries * (tokens / 37.0 if tokens else 0.0)
+            lines = [
+                "tensorfold:num_requests_running %d" % (spec["pf"] + spec["dec"]),
+                "tensorfold:requests_waiting 0",
+                "tensorfold:generation_tokens_running %d" % gauge,
+                "tensorfold:generation_tokens_total %d" % (50000 + tokens * boundaries),
+                "tensorfold:prompt_tokens_total %d" % (1000000 + 100 * boundaries),
+                "tensorfold:request_decode_time_seconds_sum %.3f" % decode_sum,
+                "tensorfold:request_decode_time_seconds_count %d" % max(1, boundaries),
+                'tensorfold:kv_cache_usage_ratio{pool="0"} 0.0839',
+            ]
+            return "\n".join(lines) + "\n"
+        with LOCK:
             lag = spec.get("lag", 0)
             if lag:
                 # 第一次读就发布一次，之后每 lag 拍才发布新值 —— 所以 lag 很大时

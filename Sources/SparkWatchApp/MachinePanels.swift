@@ -436,7 +436,12 @@ struct MachinePanels: View {
     }
 
     private func prefillHalf(_ inference: InferenceSample) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        // Same contract as the decode half: the number survives the end of the
+        // work but stops claiming to be current. A prefill that just finished is
+        // exactly the moment a person looks at the panel.
+        let fresh = (inference.prefillTPSAge ?? 0) <= SpeedDisplay.freshnessSeconds
+        let tint: Color = fresh ? palette.text : palette.muted
+        return VStack(alignment: .leading, spacing: 4) {
             Text("prefill").font(.system(size: 11, weight: .semibold, design: .rounded))
                 .textCase(.uppercase).foregroundStyle(.secondary)
             NumberUnit(
@@ -444,7 +449,8 @@ struct MachinePanels: View {
                     $0 >= 10_000 ? String(format: "%.0fk", $0 / 1000) : String(format: "%.0f", $0)
                 } ?? "--",
                 unit: "tok/s",
-                size: 26
+                size: 26,
+                tint: tint
             )
             Text(prefillNote(inference))
                 .font(.system(size: 11, design: .rounded))
@@ -456,15 +462,33 @@ struct MachinePanels: View {
 
     private func decodeStateText(_ inference: InferenceSample, state: SpeedDisplay.State) -> String {
         switch state {
-        case .live: "实时（计数器差值 ÷ 墙钟）"
+        case .live:
+            // Name the source: "live" used to mean one thing (a counter delta over
+            // the wall clock) and that one is wrong on an engine that publishes its
+            // totals at request boundaries.
+            if inference.counterStale { return "计数器未刷新（引擎按请求边界发布）" }
+            return inference.decodeTPSNative != nil
+                ? "实时（引擎 /health 原生速率）"
+                : "实时（计数器差值 ÷ 墙钟）"
         case .stopped:
-            inference.decodeTPSAge.map { String(format: "已停 %.0f 秒，数字仍是真的", $0) } ?? "已停"
+            if inference.counterStale { return "计数器未刷新（引擎按请求边界发布）" }
+            return inference.decodeTPSAge.map { String(format: "已停 %.0f 秒，数字仍是真的", $0) } ?? "已停"
         case .hidden:
-            inference.capabilities.hasSpeed ? "空闲" : "该引擎不提供速率"
+            if inference.counterStale { return "请求在跑，计数器尚未刷新" }
+            return inference.capabilities.hasSpeed ? "空闲" : "该引擎不提供速率"
         }
     }
 
     private func prefillNote(_ inference: InferenceSample) -> String {
+        // The engine reports prefill live while it runs (`/health`
+        // `live.prefill_tokens_per_second`); once it ends the figure is kept and
+        // labelled as the last one instead of turning back into "--".
+        if let age = inference.prefillTPSAge, age >= 1 {
+            return String(format: "上一段填充 · %.0f 秒前（引擎只在填充时更新）", age)
+        }
+        if inference.prefillTPSNative != nil {
+            return "实时（引擎 /health 原生速率）"
+        }
         if let cached = inference.cachedTokens, let prompt = inference.promptTokens, prompt > 0 {
             let uncached = max(0, prompt - cached)
             return String(format: "其中缓存命中 %.1fM、实际计算 %.1fM（引擎只在请求结束时记账）",

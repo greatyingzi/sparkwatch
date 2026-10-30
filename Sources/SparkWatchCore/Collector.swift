@@ -24,13 +24,32 @@ public actor NodeRuntime {
     private let tunnel: SshTunnel
     private let inferenceProbe = InferenceProbe()
     private var rateTracker = TokenRateTracker()
+    /// Live in-flight-token gauge → rate. This is the source that works *during* a
+    /// request on an engine whose `*_total` counters are only published at request
+    /// boundaries (measured on TensorFold, 2026-10-30).
+    private var gaugeTracker = GaugeTokensRateTracker()
     /// Engine-accounted decode rate (Δtokens ÷ Δdecode-seconds) — the preferred
     /// source whenever the engine exposes its own decode clock.
     private var engineRateTracker = EngineDecodeRateTracker()
     /// Prefill speed comes from the engine's own accounting (computed prompt
     /// tokens per prefill second), not from a wall-clock delta — see
-    /// `PrefillRateTracker`.
+    /// `PrefillRateTracker`. When the engine publishes a live prefill rate, that
+    /// one wins and this is only the fallback.
     private var prefillTracker = PrefillRateTracker()
+    /// Last prefill figure worth keeping, with when it was measured, so the panel
+    /// can grey it once the prefill ends instead of dropping to a dash.
+    private var lastPrefill: (value: Double, at: Date)?
+    /// Last rate the resolver actually *accepted*, with when it was measured.
+    /// Only accepted values are remembered: a rejected boundary jump used to come
+    /// back through the tracker's own `lastRate` and sit on screen at 269 tok/s.
+    private var lastAcceptedRate: (value: Double, at: Date)?
+    /// Whether the previous cycle had requests in flight: the edge is what tells a
+    /// counter jump *at completion* apart from a live counter delta.
+    private var previousEngineBusy = false
+    /// Set once this engine has answered with a live source (native rate or the
+    /// in-flight gauge). It decides whether a boundary jump may be divided by the
+    /// sample window at all.
+    private var sawLiveSource = false
     private var healthEvaluator = HealthEvaluator()
 
     private var gpu = GpuSample()
@@ -243,6 +262,7 @@ public actor NodeRuntime {
                 consecutiveInferenceFailures = 0
                 rateTracker = TokenRateTracker()
                 engineRateTracker = EngineDecodeRateTracker()
+                resetLiveRateState()
                 inferenceError = nil
             }
             return
@@ -284,10 +304,23 @@ public actor NodeRuntime {
         if let note { discoveryNote = note }
         consecutiveInferenceFailures = 0
         rateTracker = TokenRateTracker()
-                engineRateTracker = EngineDecodeRateTracker()
+        engineRateTracker = EngineDecodeRateTracker()
         prefillTracker = PrefillRateTracker()
+        resetLiveRateState()
         inferenceError = nil
         await onEndpointAdopted?(config.id, url)
+    }
+
+    /// Every rate source is keyed on one endpoint's counters. Switching endpoints
+    /// (or adopting a new port after a restart) makes all of them incomparable, so
+    /// the live ones are dropped alongside the counter trackers rather than left
+    /// to derive a rate across two different deployments.
+    private func resetLiveRateState() {
+        gaugeTracker = GaugeTokensRateTracker()
+        lastPrefill = nil
+        lastAcceptedRate = nil
+        previousEngineBusy = false
+        sawLiveSource = false
     }
 
     public func stop() {
@@ -922,41 +955,51 @@ public actor NodeRuntime {
                     let intervalSeconds = rateTracker.lastProbeAt.map {
                         Date().timeIntervalSince($0)
                     }
-                    // (The engine's own decode-seconds counter is parsed and
-                    // tracked — see `EngineDecodeRateTracker` — but deliberately
-                    // not used for the live rate: this engine flushes it in
-                    // batches, so a 2 s window can see 4.4 s of "decode time" or
-                    // none at all. Measured: it read 17.9 tok/s for work running
-                    // at 52. A counter with flush granularity coarser than the
-                    // sample window is worse than wall time, not better.)
+                    // Where the rate comes from, in order of authority — see
+                    // `InferenceRateResolver` for the measurements behind the order:
+                    //   health  the engine's own instantaneous rate
+                    //   gauge   Δin-flight-token gauge ÷ Δwall (live, aggregate)
+                    //   engine  Δtokens ÷ Δdecode-seconds, at a request boundary
+                    //   counter Δgeneration_tokens_total ÷ Δwall (vLLM / SGLang)
                     //
-                    // A wall-clock delta over an interval that contains idle time
-                    // is diluted (measured live: 4.8 tok/s reported for work
-                    // running at 52). Only an interval that is all-work counts.
-                    var rate: Double?
-                    // Counters are only comparable within one engine+model. Swapping
-                    // the model on the box (or switching engines) rebases the totals,
-                    // and a subtraction across that boundary is not a rate. A model
-                    // name that is simply *missing* this cycle must not count as a
-                    // swap, or a flaky probe would reset the baseline forever.
-                    if let generation = sample.generationTokens,
-                        let wall = rateTracker.update(
+                    // The counter is no longer the default. On this engine the
+                    // totals are published only when a request finishes: measured
+                    // 2026-10-30, `generation_tokens_total` sat frozen for the whole
+                    // 11.2 s of a request then jumped by the full 400 tokens, so a
+                    // wall-clock delta over it read 0 for the request and ~200 tok/s
+                    // at the end. Both of those were on screen.
+                    var wallRate: Double?
+                    if let generation = sample.generationTokens {
+                        // Counters are only comparable within one engine+model.
+                        // Swapping the model on the box (or switching engines)
+                        // rebases the totals, and a subtraction across that boundary
+                        // is not a rate. A model name that is simply *missing* this
+                        // cycle must not count as a swap, or a flaky probe would
+                        // reset the baseline forever.
+                        wallRate = rateTracker.update(
                             generationTokens: generation,
                             engine: sample.engine,
                             model: sample.model
-                        ),
-                        SpeedDisplay.rateIsTrustworthy(
-                            intervalSeconds: intervalSeconds,
-                            activeCadence: InferenceCadence.active
                         )
-                    {
-                        rate = wall
-                    } else if intervalSeconds != nil,
-                        SpeedDisplay.rateIsTrustworthy(
-                            intervalSeconds: intervalSeconds,
-                            activeCadence: InferenceCadence.active
-                        ) == false
-                    {
+                    }
+                    let engineRate = engineRateTracker.update(
+                        generationTokens: sample.generationTokens,
+                        decodeSeconds: sample.decodeSeconds
+                    )
+                    let gaugeRate = gaugeTracker.update(tokens: sample.runningTokens)
+
+                    let engineBusy = (sample.running ?? 0) > 0
+                    let justFinished = previousEngineBusy && !engineBusy
+                    previousEngineBusy = engineBusy
+                    if sample.runningTokens != nil || sample.decodeTPSNative != nil {
+                        sawLiveSource = true
+                    }
+
+                    let wallIsTrustworthy = SpeedDisplay.rateIsTrustworthy(
+                        intervalSeconds: intervalSeconds,
+                        activeCadence: InferenceCadence.active
+                    )
+                    if !wallIsTrustworthy, intervalSeconds != nil {
                         // The interval straddled idle time, so this reading is
                         // unusable — but the counter has now been re-baselined, so
                         // probe again almost immediately instead of waiting out a
@@ -964,25 +1007,61 @@ public actor NodeRuntime {
                         // 1.5 s and a number at 5 s.
                         forceProbeAt = Date().addingTimeInterval(0.3)
                     }
-                    if let rate {
-                        sample.decodeTPS = rate
-                        sample.decodeTPSAge = 0
-                    } else {
-                        // The counter did not move: the deployment may simply have
-                        // finished. Keep the last measured rate *with its age* so
-                        // the UI can grey it (last known) rather than either lying
-                        // green or dropping to a bare dash.
-                        sample.decodeTPS = rateTracker.lastRate
-                        sample.decodeTPSAge = rateTracker.age()
+
+                    let resolution = InferenceRateResolver.resolve(
+                        nativeRate: sample.decodeTPSNative,
+                        nativeBusy: engineBusy,
+                        gaugeRate: gaugeRate,
+                        wallRate: wallIsTrustworthy ? wallRate : nil,
+                        engineRate: engineRate,
+                        justFinished: justFinished,
+                        hasLiveSource: sawLiveSource
+                    )
+                    if resolution.source == "boundary" {
+                        // The counter jump belonged to a request that has already
+                        // ended; it is not this window's rate and must not linger.
+                        rateTracker.discardLastRate()
                     }
-                    if let delta = prefillTracker.update(
+                    if let tps = resolution.tps {
+                        sample.decodeTPS = tps
+                        sample.decodeTPSAge = 0
+                        lastAcceptedRate = (tps, Date())
+                    } else {
+                        // Nothing live this cycle: keep the most recent measurement
+                        // *with its age* so the UI greys it (last known) rather than
+                        // either lying green or dropping to a bare dash.
+                        let candidates: [(tps: Double, age: Double)] = [
+                            lastAcceptedRate.map { ($0.value, Date().timeIntervalSince($0.at)) },
+                            rateTracker.lastRate.map { ($0, rateTracker.age() ?? 0) },
+                            gaugeTracker.lastRate.map { ($0, gaugeTracker.age() ?? 0) },
+                        ].compactMap { $0 }
+                        let freshest = candidates.min { $0.age < $1.age }
+                        sample.decodeTPS = freshest?.tps
+                        sample.decodeTPSAge = freshest?.age
+                    }
+                    // "Stale" is a claim about a counter that should have moved.
+                    // On the very first probe there is no previous reading to have
+                    // moved from, so it must not be reported as a stall.
+                    sample.counterStale = resolution.counterStale && intervalSeconds != nil
+
+                    let trackedPrefill = prefillTracker.update(
                         promptTokens: sample.promptTokens,
                         cachedTokens: sample.cachedTokens,
                         prefillSeconds: sample.prefillSeconds,
                         engine: sample.engine,
                         model: sample.model
+                    )
+                    if let value = InferenceRateResolver.prefill(
+                        native: sample.prefillTPSNative, tracked: trackedPrefill
                     ) {
-                        sample.prefillTPS = delta
+                        lastPrefill = (value, Date())
+                        sample.prefillTPS = value
+                        sample.prefillTPSAge = 0
+                    } else if let lastPrefill {
+                        // The prefill ended: keep the figure, grey it. A dash here
+                        // used to be the permanent state on this engine.
+                        sample.prefillTPS = lastPrefill.value
+                        sample.prefillTPSAge = Date().timeIntervalSince(lastPrefill.at)
                     }
                     if ProcessInfo.processInfo.environment["SPARKWATCH_TRACE"] != nil {
                         let gen = sample.generationTokens.map { String(format: "%.0f", $0) } ?? "nil"
@@ -992,12 +1071,19 @@ public actor NodeRuntime {
                         // afterwards always reads ~0 (their update refreshes the
                         // very timestamp the gap is measured from).
                         let since = intervalSeconds.map { String(format: "%.1f", $0) } ?? "nil"
-                        let source = engineRateTracker.lastSource
+                        // Which source answered, and what the other sources were
+                        // saying at the same instant: without the live ones a
+                        // correct number and a lucky one look identical.
+                        let source = resolution.source + "/" + engineRateTracker.lastSource
                         // Every link in the chain, so "why is the number late" is
                         // answerable from the log instead of by argument.
                         let line = "[trace] \(config.name) t=\(String(format: "%.2f", Date().timeIntervalSince1970))"
                             + " gap=\(since) gen=\(gen) sec=\(sample.decodeSeconds.map { String(format: "%.1f", $0) } ?? "nil")"
                             + " tps=\(tps) age=\(sample.decodeTPSAge.map { String(format: "%.0f", $0) } ?? "nil") src=\(source) inflight=\(running)"
+                            + " live=\(sample.decodeTPSNative.map { String(format: "%.1f", $0) } ?? "nil")"
+                            + " gauge=\(sample.runningTokens.map { String(format: "%.0f", $0) } ?? "nil")"
+                            + " prefill=\(sample.prefillTPS.map { String(format: "%.0f", $0) } ?? "nil")"
+                            + " stale=\(sample.counterStale ? 1 : 0)"
                             + " cadence=\(String(format: "%.1f", cadence))"
                             // ident = the counters this rate belongs to, and reset=1 when
                             // the tracker threw its baseline away because that identity

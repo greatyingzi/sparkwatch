@@ -287,6 +287,7 @@ SparkWatch 是它们的交集：**同时看两台机器、走官方 dashboard �
 | **llama.cpp** / llama-server | `/metrics` 含 `llamacpp:` + `/v1/models` 的 `meta` | token、processing/deferred、原生 tok/s、投机接受率、量化、上下文、参数量 | ✅ llama-server 0.4.1 (Qwen2.5-0.5B) |
 | **LM Studio** | `/api/v0/models` | 模型、加载状态、量化、架构、上下文；**无计数器** | ✅ :1234 上的 server |
 | **Ollama** | `/api/ps` | 已加载模型、VRAM、量化、参数量；**无计数器** | ✅ spark-b :11434 |
+| **TensorFold** | `/metrics` 含 `tensorfold:`（或旧版 `tensorfold_`）族 | 解码/填充速率（`/health` 实时值优先）、running/waiting、KV%、MTP 接受率、TTFT 与延迟分位 | ✅ 客户机 `:1235`→`:18000`（2026-10-30，两代 `/health` schema） |
 | **TGI** | `/metrics` 含 `tgi_` 族 | token、批大小、队列 | ❌ 只有名字——没有活的 TGI 可测 |
 | 任何 **OpenAI 兼容** | `/v1/models` | 模型名 + 可达性 | ✅ 走 llama.cpp 那条路 |
 
@@ -341,9 +342,29 @@ ACPI 区那条规则也是在它对这对机器产生常年 ⚠ 之后重写的�
 
 ## 解码速度：测量与呈现
 
-速率是**计数器差分**：每次探测（机器在干活时 2 秒一次，闲时 6 秒一次）读引擎的
-`completion_tokens_total`，tok/s 就是增长量除以经过的时间。不做平均，也不外推——
-计数器没动的探测不产生任何速率。
+速率有四个来源，按可信度排序，而不是按先来后到（判据与实测数字见
+`Sources/SparkWatchCore/InferenceRate.swift`）：
+
+| 来源 | 怎么算 | 什么时候用 |
+| --- | --- | --- |
+| `health` | 引擎自己的瞬时速率（TensorFold `/health` → `live.decode_tokens_per_second`） | 有请求在跑时首选 |
+| `gauge` | Δ在飞 token 数 ÷ Δ墙钟（`tensorfold:generation_tokens_running`） | 引擎没有原生速率时 |
+| `engine` | Δtokens ÷ Δdecode-seconds | 请求刚结束那一下，给一个诚实的收尾值 |
+| `counter` | Δ`*_tokens_total` ÷ Δ墙钟 | 计数器真能实时增长的引擎（vLLM、SGLang） |
+
+**计数器差分不再是默认来源**，因为它不是所有引擎都实时。2026-10-30 在一台真实 TensorFold
+上实测：11.2 秒的请求期间 `tensorfold:generation_tokens_total` 一次没动（29 次探测里只有 1 次
+看到增长），结束时一次性 +400 token。把这个跳变除以采样窗口，请求进行中读 0、结束那一拍读
+200 tok/s —— 两个数字都真的出现在过屏幕上。现在边界跳变会被识别出来：有引擎 decode 秒数就用它
+做分母（同一次实测 36.4 tok/s，墙钟口径 35.8），有实时来源时直接丢弃，且不留在"上次已知"里。
+
+prefill 同理。新 build 的 `/health` 只提供 `live.prefill_tokens_per_second`（实测填充阶段
+862–1006 tok/s，填充结束归 0），旧的 `prefill_seconds_total` / `cached_tokens_total` 已经不存在了；
+旧解析器要三个字段齐全才出数，于是填充速率长期显示 `--`。现在实时值优先，填充结束后保留最后一次
+读数并标注"上一段填充 · N 秒前"，而不是退回破折号。
+
+每次探测在机器干活时 2 秒一次、闲时 6 秒一次；不做平均，也不外推——一个窗口里没有增长的计数器
+不产生任何速率。
 
 这留下一个呈现问题，而 app 一开始答错了：在最后一个 token 到下一次探测之间、以及请求结束后
 的一段时间里，最近一次测量仍然是最近的**事实**——但把它用与实时速率相同的亮绿色显示，

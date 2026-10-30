@@ -442,7 +442,35 @@ public struct InferenceSample: Sendable, Equatable {
     /// prefill seconds only move when a request completes. That is why the UI
     /// labels it as the last finished prompt, while live progress during a prefill
     /// comes from the in-flight count and its age.
+    ///
+    /// When the engine publishes a live rate of its own (`prefillTPSNative`), that
+    /// value wins and this one is only the fallback.
     public var prefillTPS: Double?
+    /// Seconds since `prefillTPS` was measured. Nil = measured this cycle. Same
+    /// greying contract as `decodeTPSAge`: a prefill figure survives the end of the
+    /// prefill, but it stops pretending to be current.
+    public var prefillTPSAge: Double?
+    /// The engine's own *instantaneous* decode rate (TensorFold
+    /// `/health` → `live.decode_tokens_per_second`).
+    ///
+    /// This is the only live source on an engine whose Prometheus totals are
+    /// published at request boundaries: measured on the live deployment
+    /// (2026-10-30), `tensorfold:generation_tokens_total` sat frozen for the whole
+    /// 11 s of a request and then jumped by the full 400 tokens — a wall-clock
+    /// delta over that is 0 for the entire request and a ~200 tok/s spike at the
+    /// end, which is exactly what the display used to show.
+    public var decodeTPSNative: Double?
+    /// The engine's own instantaneous prefill rate (`live.prefill_tokens_per_second`).
+    /// 862–1006 tok/s while a prefill runs, 0 afterwards.
+    public var prefillTPSNative: Double?
+    /// Live in-flight token gauge (`tensorfold:generation_tokens_running`, summed
+    /// across streams). Its derivative is the aggregate decode rate and — unlike
+    /// the totals — it moves *during* the request.
+    public var runningTokens: Double?
+    /// Set when requests were in flight but the token counter did not move: the
+    /// engine publishes totals only at request boundaries. Shown as "计数器未刷新"
+    /// rather than as 0 or as a stale green number.
+    public var counterStale: Bool = false
     public var promptTokens: Double?
     /// Engine-accounted prefill time, in seconds. Moves only when a request
     /// finishes, which is why it is paired with `promptTokens`/`cachedTokens` by

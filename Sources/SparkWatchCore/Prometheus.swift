@@ -43,6 +43,15 @@ public struct PrometheusSnapshot: Sendable, Equatable {
     public var activeRequests: Double = 0
     public var queuedRequests: Double = 0
     public var nativeGenerationTPS: Double?
+    /// Tokens generated so far by the generations that are *still running*
+    /// (`tensorfold:generation_tokens_running`, summed over streams).
+    ///
+    /// Unlike every `*_total` above, this gauge moves *during* a request, so its
+    /// derivative is a live decode rate. Measured on the live deployment
+    /// (2026-10-30): 6 → 395 over a single 11 s request, and 17 → 579 with two
+    /// concurrent streams (aggregate: +50.6 tok/s, matching the engine's own
+    /// `/health` rate).
+    public var generationTokensRunning: Double?
     public var kvUsagePct: Double?
     /// Speculative-decode acceptance, where the engine exposes the counters.
     public var specAcceptance: Double?
@@ -175,15 +184,22 @@ public enum PrometheusParser {
                 ?? values["tensorfold_health:completion_tokens_total"]
                 ?? values["tensorfold_completion_tokens_total"] ?? 0
             snapshot.decodeSeconds = values["tensorfold_health:decode_seconds_total"]
+                ?? values["tensorfold:request_decode_time_seconds_sum"]
                 ?? values["tensorfold_decode_seconds_total"] ?? 0
             snapshot.promptTokens = values["tensorfold:prompt_tokens_total"]
                 ?? values["tensorfold_health:prompt_tokens_total"]
                 ?? values["tensorfold_prompt_tokens_total"] ?? 0
+            // The one family member that is live rather than boundary-published.
+            snapshot.generationTokensRunning = values["tensorfold:generation_tokens_running"]
             snapshot.processedRequests = values["tensorfold_health:requests_total"]
                 ?? values["tensorfold_requests_total"] ?? 0
+            // Two spellings live side by side on the same build; read both rather
+            // than pick one and report "0 running" for a working box.
             snapshot.activeRequests = values["tensorfold:requests_running"]
+                ?? values["tensorfold:num_requests_running"]
                 ?? values["tensorfold_requests_inflight"] ?? 0
-            snapshot.queuedRequests = values["tensorfold:requests_waiting"] ?? 0
+            snapshot.queuedRequests = values["tensorfold:requests_waiting"]
+                ?? values["tensorfold:num_requests_waiting"] ?? 0
             // Ratio with a `pool` label (summed across pools by the accumulator).
             snapshot.kvUsagePct = values["tensorfold:kv_cache_usage_ratio"]
                 .map { $0 <= 1 ? $0 * 100 : $0 }
@@ -508,6 +524,18 @@ public struct TokenRateTracker: Sendable {
         lastRateValue = (generationTokens - previous.generationTokens) / seconds
         lastRateAt = now
         return lastRateValue
+    }
+
+    /// Throw away the last published rate without moving the baseline.
+    ///
+    /// Needed when the collector decides the delta behind a rate was not a rate:
+    /// on a boundary-published engine the counter jumps by a whole request's
+    /// tokens at the moment it finishes, and that quotient (measured: 268.9 tok/s
+    /// for work running at 35) must not survive as "last known" — the greyed
+    /// number is what a person reads after the request is gone.
+    public mutating func discardLastRate() {
+        lastRateValue = nil
+        lastRateAt = nil
     }
 
     /// Seconds since the counter last *grew* — i.e. how old the last rate is.

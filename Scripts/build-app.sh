@@ -15,7 +15,7 @@ BUNDLE_ID="com.yingzi.sparkwatch"
 # Overridable so a release workflow can stamp the tag's version into the bundle:
 # the published DMG must not be named one version while the app inside says
 # another. Falls back to the development version for local builds.
-VERSION="${VERSION:-0.3.0}"
+VERSION="${VERSION:-0.3.1}"
 DIST="$ROOT/dist"
 APP="$DIST/$APP_NAME.app"
 # The icon is a committed asset (Assets/AppIcon.icns) rather than something every

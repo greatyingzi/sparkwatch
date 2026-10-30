@@ -305,6 +305,7 @@ public struct InferenceProbe: Sendable {
         sample.model = snapshot.modelNames.first
         sample.running = snapshot.activeRequests
         sample.waiting = snapshot.queuedRequests
+        sample.runningTokens = snapshot.generationTokensRunning
         sample.promptTokens = snapshot.promptTokens
         sample.generationTokens = snapshot.generationTokens
         // The engine's own decode clock — the denominator that cannot be diluted
@@ -340,6 +341,32 @@ public struct InferenceProbe: Sendable {
     ///   "accepted_total":25219,"streams":{"decoding":0,"prefilling":4,"max":4},
     ///   "context_length":1048576}`
     static func mergeTensorFoldHealth(_ health: [String: Any], into sample: inout InferenceSample) {
+        // Current shape (new build, measured on the deployment 2026-10-30) — the
+        // counters are *gone*; only live state is left:
+        //   {"status":"ok","model":"dgx-spark","model_ids":["dgx-spark"],
+        //    "max_batch_size":8,"warming":false,"memory":{},
+        //    "live":{"connections":0,"waiting":0,
+        //            "decode_tokens_per_second":0.0,
+        //            "prefill_tokens_per_second":0.0}}
+        //
+        // The 2026-09 parser below read `completion_tokens_total` /
+        // `cached_tokens_total` / `prefill_seconds_total` / `inflight` /
+        // `streams` and matched **none** of them. That is how the prefill rate
+        // became permanently "--" (`PrefillRateTracker` needs prompt + cached +
+        // seconds, and two of the three went nil) and how the decode rate fell
+        // back to boundary-published counters. Both shapes are read; `live` wins
+        // wherever they overlap.
+        if let live = health["live"] as? [String: Any] {
+            if let rate = number(live["decode_tokens_per_second"]) {
+                sample.decodeTPSNative = rate
+                sample.capabilities.hasSpeed = true
+            }
+            if let rate = number(live["prefill_tokens_per_second"]) {
+                sample.prefillTPSNative = rate
+            }
+            if let connections = number(live["connections"]) { sample.running = connections }
+            if let waiting = number(live["waiting"]) { sample.waiting = waiting }
+        }
         // The counters MUST come from here, not from `/metrics`.
         //
         // Measured on the live deployment (2026-10-01): with two requests

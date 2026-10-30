@@ -414,10 +414,36 @@ so it only ever echoed the same condition onto a second line.
 
 ## Decode speed: measurement and presentation
 
-The rate is a **counter delta**: the engine's `completion_tokens_total` is read on
-every probe (2 s while the box is working, 6 s when it is quiet), and tok/s is the growth divided by the elapsed time. Nothing is
-averaged and nothing is extrapolated — a probe whose counter did not move produces
-no rate at all.
+Four sources, ranked by how much they can be trusted rather than by which one is
+easiest to compute (the rule and the measurements behind it live in
+`Sources/SparkWatchCore/InferenceRate.swift`):
+
+| source | arithmetic | used when |
+| --- | --- | --- |
+| `health` | the engine's own instantaneous rate (TensorFold `/health` → `live.decode_tokens_per_second`) | preferred whenever requests are in flight |
+| `gauge` | Δin-flight tokens ÷ Δwall (`tensorfold:generation_tokens_running`) | the engine publishes no native rate |
+| `engine` | Δtokens ÷ Δdecode-seconds | the instant a request finishes — an honest closing figure |
+| `counter` | Δ`*_tokens_total` ÷ Δwall | engines whose counters really do move live (vLLM, SGLang) |
+
+**The counter delta is no longer the default**, because it is not live on every
+engine. Measured on a real TensorFold deployment (2026-10-30): during an 11.2 s
+request `tensorfold:generation_tokens_total` did not move once (1 of 29 polls saw
+growth) and then jumped by the full 400 tokens at the end. Dividing that by the
+sample window read 0 tok/s for the whole request and ~200 tok/s at the end — both
+of which were on screen. A boundary jump is now recognised as such: divided by the
+engine's own decode clock when there is one (36.4 tok/s on the same run; 35.8 by
+wall clock), dropped when a live source exists, and never kept as "last known".
+
+Prefill follows the same rule. The current build's `/health` exposes only
+`live.prefill_tokens_per_second` (862–1006 tok/s during a prefill, 0 after it); the
+old `prefill_seconds_total` / `cached_tokens_total` keys are gone. The old parser
+required all three, so the prefill figure read `--` permanently. It now prefers the
+live value and, once the prefill ends, keeps the last reading labelled "last
+prefill · Ns ago" instead of collapsing back to a dash.
+
+Probes run every 2 s while the box is working and every 6 s when it is quiet.
+Nothing is averaged and nothing is extrapolated — a probe whose counter did not
+move produces no rate at all.
 
 That leaves a presentation question the app got wrong: between the last token and
 the next probe, and for a while after a request ends, the most recent

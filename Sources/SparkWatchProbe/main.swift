@@ -78,8 +78,16 @@ if let index = arguments.firstIndex(of: "--render"), index + 1 < arguments.count
     let samples = arguments.firstIndex(of: "--samples").flatMap { $0 + 1 < arguments.count ? Int(arguments[$0 + 1]) : nil } ?? 3
     let interval = arguments.firstIndex(of: "--interval").flatMap { $0 + 1 < arguments.count ? Double(arguments[$0 + 1]) : nil } ?? 1.5
     let probe = InferenceProbe()
+    // The same four sources, in the same order, as the collector — otherwise the
+    // probe would bless a number the app would never show.
     var decodeTracker = TokenRateTracker()
+    var gaugeTracker = GaugeTokensRateTracker()
+    var engineRateTracker = EngineDecodeRateTracker()
     var prefillTracker = PrefillRateTracker()
+    var previousBusy = false
+    var sawLiveSource = false
+    var lastPrefill: (value: Double, at: Date)?
+    var lastAcceptedRate: (value: Double, at: Date)?
     var last: InferenceSample?
     var transportNote: String?
 
@@ -90,25 +98,67 @@ if let index = arguments.firstIndex(of: "--render"), index + 1 < arguments.count
             let engineName = sample.engine
             let modelName = sample.model
             let gap = decodeTracker.lastProbeAt.map { Date().timeIntervalSince($0) }
-            if let generation = sample.generationTokens,
-                let rate = decodeTracker.update(
+            var wallRate: Double?
+            if let generation = sample.generationTokens {
+                wallRate = decodeTracker.update(
                     generationTokens: generation, engine: engineName, model: modelName
-                ),
-                SpeedDisplay.rateIsTrustworthy(intervalSeconds: gap, activeCadence: 2)
-            {
-                sample.decodeTPS = rate
+                )
+            }
+            let engineRate = engineRateTracker.update(
+                generationTokens: sample.generationTokens, decodeSeconds: sample.decodeSeconds
+            )
+            let gaugeRate = gaugeTracker.update(tokens: sample.runningTokens)
+            let busy = (sample.running ?? 0) > 0
+            let justFinished = previousBusy && !busy
+            previousBusy = busy
+            if sample.runningTokens != nil || sample.decodeTPSNative != nil { sawLiveSource = true }
+            let trustworthy = SpeedDisplay.rateIsTrustworthy(intervalSeconds: gap, activeCadence: 2)
+            let resolution = InferenceRateResolver.resolve(
+                nativeRate: sample.decodeTPSNative,
+                nativeBusy: busy,
+                gaugeRate: gaugeRate,
+                wallRate: trustworthy ? wallRate : nil,
+                engineRate: engineRate,
+                justFinished: justFinished,
+                hasLiveSource: sawLiveSource
+            )
+            if resolution.source == "boundary" { decodeTracker.discardLastRate() }
+            if let tps = resolution.tps {
+                sample.decodeTPS = tps
                 sample.decodeTPSAge = 0
-            } else if let kept = decodeTracker.lastRate {
-                sample.decodeTPS = kept
-                sample.decodeTPSAge = decodeTracker.age()
+                lastAcceptedRate = (tps, Date())
+            } else {
+                let kept: [(tps: Double, age: Double)] = [
+                    lastAcceptedRate.map { ($0.value, Date().timeIntervalSince($0.at)) },
+                    decodeTracker.lastRate.map { ($0, decodeTracker.age() ?? 0) },
+                    gaugeTracker.lastRate.map { ($0, gaugeTracker.age() ?? 0) },
+                ].compactMap { $0 }
+                let freshest = kept.min { $0.age < $1.age }
+                sample.decodeTPS = freshest?.tps
+                sample.decodeTPSAge = freshest?.age
             }
-            if let delta = prefillTracker.update(
-                promptTokens: sample.promptTokens,
-                cachedTokens: sample.cachedTokens,
-                prefillSeconds: sample.prefillSeconds
+            sample.counterStale = resolution.counterStale && gap != nil
+            if let value = InferenceRateResolver.prefill(
+                native: sample.prefillTPSNative,
+                tracked: prefillTracker.update(
+                    promptTokens: sample.promptTokens,
+                    cachedTokens: sample.cachedTokens,
+                    prefillSeconds: sample.prefillSeconds
+                )
             ) {
-                sample.prefillTPS = delta
+                lastPrefill = (value, Date())
+                sample.prefillTPS = value
+                sample.prefillTPSAge = 0
+            } else if let lastPrefill {
+                sample.prefillTPS = lastPrefill.value
+                sample.prefillTPSAge = Date().timeIntervalSince(lastPrefill.at)
             }
+            print("SAMPLE src=\(resolution.source) tps=\(sample.decodeTPS.map { String(format: "%.1f", $0) } ?? "-") "
+                + "live=\(sample.decodeTPSNative.map { String(format: "%.1f", $0) } ?? "-") "
+                + "gauge=\(sample.runningTokens.map { String(format: "%.0f", $0) } ?? "-") "
+                + "gen=\(sample.generationTokens.map { String(format: "%.0f", $0) } ?? "-") "
+                + "prefill=\(sample.prefillTPS.map { String(format: "%.0f", $0) } ?? "-") "
+                + "busy=\(sample.running.map { String(format: "%.0f", $0) } ?? "-") stale=\(sample.counterStale ? 1 : 0)")
             transportNote = sample.transportNote
             last = sample
         } catch {
@@ -156,7 +206,7 @@ if let index = arguments.firstIndex(of: "--render"), index + 1 < arguments.count
     print("RENDER tps=\(sample.decodeTPS.map { String(format: "%.1f", $0) } ?? "-")")
     print("RENDER age=\(sample.decodeTPSAge.map { String(format: "%.0f", $0) } ?? "-")")
     print("RENDER inflight=\(sample.running.map { String(format: "%.0f", $0) } ?? "-") prefilling=\(sample.prefilling.map { String(format: "%.0f", $0) } ?? "-") decoding=\(sample.decoding.map { String(format: "%.0f", $0) } ?? "-")")
-    print("RENDER gen=\(sample.generationTokens.map { String(format: "%.0f", $0) } ?? "-") prefillTps=\(sample.prefillTPS.map { String(format: "%.0f", $0) } ?? "-") ctx=\(sample.contextLength.map(String.init) ?? "-")")
+    print("RENDER gen=\(sample.generationTokens.map { String(format: "%.0f", $0) } ?? "-") prefillTps=\(sample.prefillTPS.map { String(format: "%.0f", $0) } ?? "-") prefillAge=\(sample.prefillTPSAge.map { String(format: "%.0f", $0) } ?? "-") ctx=\(sample.contextLength.map(String.init) ?? "-")")
     print("RENDER cacheHit=\(sample.cacheHitPct.map { String(format: "%.0f", $0) } ?? "-") accept=\(sample.acceptancePct.map { String(format: "%.0f", $0) } ?? "-") fatal=\(sample.engineFatal) stalled=\(sample.stalledRequests.map { String(format: "%.0f", $0) } ?? "-")")
     print("RENDER via=\(transportNote == nil ? "direct" : "ssh")")
     exit(0)

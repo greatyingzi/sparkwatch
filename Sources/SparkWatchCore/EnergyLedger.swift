@@ -46,7 +46,9 @@ public struct EnergyLedger: Sendable, Codable {
         }
     }
 
-    private struct Bucket: Codable {
+    // internal 而非 private：DayQueries.swift 的按天查询/播种要读写分钟桶，
+    // 同模块跨文件访问需要 internal；public 契约不变。
+    struct Bucket: Codable {
         var wh: Double = 0            // 这一分钟内积出的电（Wh）
         var coveredMs: Double = 0     // 这一分钟内被采样连续覆盖的毫秒
         var outputTokens: Double = 0  // 这一分钟内（被覆盖的）输出 token 增量
@@ -69,7 +71,8 @@ public struct EnergyLedger: Sendable, Codable {
     /// 容忍四五次丢包，而不把真正的空洞当成连续。
     public var maxGap: TimeInterval
 
-    private var buckets: [Int: Bucket] = [:]
+    // internal：按天查询（DayQueries.swift）单遍扫桶、seedBucket 直写都要用它。
+    var buckets: [Int: Bucket] = [:]
     private var nodes: [UUID: NodeState] = [:]
     private var recent: [RecentSample] = []
 

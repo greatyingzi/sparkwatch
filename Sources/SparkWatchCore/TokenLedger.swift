@@ -55,18 +55,22 @@ public struct TokenLedger: Sendable, Codable {
     }
 
     /// 一条 series = 一个 (nodeID, port)。
-    private struct SeriesKey: Codable, Hashable {
+    /// internal 而非 private：DayQueries.swift 的按天查询要单遍扫 series×model×hour，
+    /// 同模块跨文件读存储需要 internal；public 契约不变。
+    struct SeriesKey: Codable, Hashable {
         var nodeID: UUID
         var port: Int
     }
 
-    private struct Counts: Codable, Equatable {
+    // 同上：查询侧要读桶内三分量。
+    struct Counts: Codable, Equatable {
         var prompt: Double = 0
         var completion: Double = 0
         var cached: Double = 0
     }
 
-    private struct SeriesState: Codable {
+    // 同上：查询侧要遍历 models 的小时桶。
+    struct SeriesState: Codable {
         var lastPrompt: Double?
         var lastCompletion: Double?
         var lastCached: Double?
@@ -80,7 +84,8 @@ public struct TokenLedger: Sendable, Codable {
     public var maxSeries: Int
     public var maxModelsPerSeries: Int
 
-    private var series: [SeriesKey: SeriesState] = [:]
+    // internal：按天查询（DayQueries.swift）单遍扫桶需要读它；public 契约不变。
+    var series: [SeriesKey: SeriesState] = [:]
 
     public init(retentionDays: Int = 35, maxSeries: Int = 200, maxModelsPerSeries: Int = 100) {
         self.retentionDays = retentionDays
@@ -169,8 +174,8 @@ public struct TokenLedger: Sendable, Codable {
         }
     }
 
-    public func totals(_ range: Range, now: Date) -> Totals {
-        let start = startHour(range, now: now)
+    public func totals(_ range: Range, now: Date, timeZone: TimeZone = .current) -> Totals {
+        let start = startHour(range, now: now, timeZone: timeZone)
         var totals = Totals(prompt: 0, completion: 0, cached: 0)
         for state in series.values {
             for hours in state.models.values {
@@ -185,8 +190,8 @@ public struct TokenLedger: Sendable, Codable {
     }
 
     /// 按模型汇总，completion 降序。
-    public func byModel(_ range: Range, now: Date) -> [ModelRow] {
-        let start = startHour(range, now: now)
+    public func byModel(_ range: Range, now: Date, timeZone: TimeZone = .current) -> [ModelRow] {
+        let start = startHour(range, now: now, timeZone: timeZone)
         var aggregate: [String: (prompt: Double, completion: Double, cached: Double, series: Set<SeriesKey>)] = [:]
         for (key, state) in series {
             for (model, hours) in state.models {
@@ -257,12 +262,18 @@ public struct TokenLedger: Sendable, Codable {
     // MARK: - Internals
 
     /// 该 range 的起始 UTC 小时索引；`.all` 返回 nil（不设下界）。
-    private func startHour(_ range: Range, now: Date) -> Int? {
+    /// `.today` 的边界用**查询时区的本地零点**：大数字的「今天」必须和按天图最后一根
+    /// 「今天」柱同口径（都从本地零点起），否则同一页面两个「今天」对不上。
+    /// UTC+8 下这比旧口径（UTC 零点）晚 8 小时起算——显式传 UTC 即回到旧行为。
+    /// 周/14/30 天是滚动窗口，与时区无关，保持原样。
+    private func startHour(_ range: Range, now: Date, timeZone: TimeZone) -> Int? {
         switch range {
         case .all:
             return nil
         case .today:
-            return Int(floor(now.timeIntervalSince1970 / 86400) * 24)
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = timeZone
+            return Int(floor(calendar.startOfDay(for: now).timeIntervalSince1970 / 3600))
         case .week:
             return Int(floor((now.timeIntervalSince1970 - 7 * 86400) / 3600))
         case .twoWeeks:

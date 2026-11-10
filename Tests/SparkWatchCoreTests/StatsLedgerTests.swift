@@ -310,7 +310,10 @@ struct TokenLedgerTests {
         ledger.observe(nodeID: nodeA, port: 8888, model: "m", prompt: 0, completion: 100, cached: 0, at: midnight.addingTimeInterval(60))
         ledger.observe(nodeID: nodeA, port: 8888, model: "m", prompt: 0, completion: 250, cached: 0, at: midnight.addingTimeInterval(120))
 
-        #expect(ledger.totals(.today, now: now).completion == 150)
+        // A3 起「今天」= 查询时区的本地零点；本测试的日界锚在 UTC 上（数据全用
+        // UTC 零点铺），显式传 UTC 才钉得住「昨天 23:59 / 今天 00:01」这条边界。
+        // 机器时区不可依赖，本地零点语义由 DayQueryTests 单独覆盖。
+        #expect(ledger.totals(.today, now: now, timeZone: TimeZone(identifier: "UTC")!).completion == 150)
         #expect(ledger.totals(.all, now: now).completion == 250)
     }
 

@@ -2,25 +2,22 @@ import AppKit
 import SparkWatchCore
 import SwiftUI
 
-/// The GPU history chart: utilisation as an envelope + mean line, with temperature
-/// and power behind it, over 30 minutes, 1 hour or 8 hours.
+/// The GPU history chart, redesigned as **layered small multiples**:
 ///
-/// Three decisions, each from looking at the real data rather than at the design:
+///   * 主图 = 利用率（0–100%，唯一有天然量程的序列）：平滑均值线 + min–max 色带。
+///   * 温度、功耗 = 两条**自适应量程**的细带——旧版把三者挤进同一个 0–100 坐标，
+///     功耗一旦过 100 W 就整段削顶贴顶（这台机队突发就是 50–95 W，图上永远贴着
+///     上沿），温度又被利用率压得看不清。分层后各看各的形状，右侧标注实际量程。
 ///
-///  1. **An envelope, not just a line.** On this hardware utilisation swings between
-///     ~95 % and ~0 % *inside a single bucket* — the engine is busy, then idle, then
-///     busy — and the GPU rail swings tens of watts with it (measured on this fleet:
-///     adjacent-bucket jumps average 15.6 points of utilisation and 9.3 W, with
-///     maxima of 96 points and 84 W). A mean line through that is a picket fence.
-///     The min–max band shows the swing, the line shows where it sat, and neither is
-///     smoothed into a shape the hardware did not produce.
-///  2. **The x-axis zooms to the data.** A fixed 30-minute window is honest but looks
-///     broken for the first half hour after launch, because the history starts when
-///     the app does. When less than ~60 % of the requested span exists, the chart
-///     draws the span it *has* and says so ("历史起点 9 分钟前") instead of leaving
-///     two thirds of the canvas empty.
-///  3. **Gaps stay gaps.** The series comes from a ring buffer with a 1.5 s sampling
-///     floor; anything not observed is a hole, not a straight line through it.
+/// 保留的三条老规矩（出处见 git 历史，都是被真数据教出来的）：
+///
+///  1. **色带而不是只有一条线**：这台机器几秒内 95% ↔ 0% 摆动（相邻桶均值跳
+///     15.6 个点），均值线是栅栏，min–max 带才是占空比本体。
+///  2. **x 轴缩放到数据**：历史不足请求窗口的 60% 时画已有的跨度并明说
+///     （「历史起点 N 分钟前」），不留两 third 空白。
+///  3. **断口是断口**：没观测到的桶留空不连线；平滑也**断口感知**（ChartSmoothing），
+///     绝不把「不知道」平均成「过渡」。绘制层平滑只动线形，图例峰值/右侧标注
+///     仍取原始桶值——平滑值可核对，不是「好看一点的谎」。
 struct GpuHistoryChart: View {
     @ObservedObject var model: AppModel
     var nodeID: UUID
@@ -58,11 +55,8 @@ struct GpuHistoryChart: View {
     }
 
     private var effectiveWindow: TimeInterval { scale.window }
-
     private var bucketCount: Int { scale.buckets }
-
     private var bucketSeconds: Double { scale.bucketSeconds }
-
     private var zoomed: Bool { scale.zoomed }
 
     private var series: (util: [Double?], power: [Double?], temp: [Double?],
@@ -72,9 +66,20 @@ struct GpuHistoryChart: View {
         model.binnedHistory(for: nodeID, window: effectiveWindow, buckets: bucketCount)
     }
 
+    /// 绘制平滑半径（桶数比例：约 ±2% 跨度，中心权最重）。桶越多半径越大，
+    /// 但封顶 8 —— 8h 视图每桶已是 2 分钟均值，再糊就没形状了。
+    private var smoothRadius: Int { max(2, min(8, bucketCount / 40)) }
+
     var body: some View {
         let data = series
-        return VStack(alignment: .leading, spacing: 10) {
+        let smooth = (
+            util: ChartSmoothing.movingAverage(data.util, radius: smoothRadius),
+            power: ChartSmoothing.movingAverage(data.power, radius: smoothRadius),
+            temp: ChartSmoothing.movingAverage(data.temp, radius: smoothRadius),
+            utilLow: ChartSmoothing.movingAverage(data.utilLow, radius: smoothRadius),
+            utilHigh: ChartSmoothing.movingAverage(data.utilHigh, radius: smoothRadius)
+        )
+        return VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
                 Text("GPU 历史")
                     .font(.system(size: 14, weight: .semibold, design: .rounded))
@@ -93,7 +98,11 @@ struct GpuHistoryChart: View {
                 .frame(width: 200)
             }
 
-            chart(data)
+            mainChart(smooth)
+            layerSeparator
+            strip("温度", color: palette.info, values: smooth.temp) { String(format: "%.0f°", $0) }
+            layerSeparator
+            strip("功耗", color: palette.violet, values: smooth.power) { String(format: "%.0f W", $0) }
 
             HStack(spacing: 14) {
                 legendItem("利用率", value: data.maxUtil.map { String(format: "峰值 %.0f%%", $0) }, color: palette.accent)
@@ -105,7 +114,7 @@ struct GpuHistoryChart: View {
                     .foregroundStyle(.tertiary)
             }
 
-            Text("共用 0–100 量程（利用率 %、温度 °C、功耗 W）。每格是约 \(Int(bucketSeconds)) 秒的平均值 —— 这台机器几秒内就能从 95% 摆到 0%，所以看到的是**占空比**而不是瞬时值；没观测到的时段留空，不连线。")
+            Text("三层各管各的量程：利用率固定 0–100%，温度/功耗按观测区间自适应（右侧标注）。曲线与色带做了轻度展示平滑（居中加权均值，断口不跨），图例峰值与右侧标注是**原始桶值**；每格约 \(Int(bucketSeconds)) 秒 —— 这台机器几秒内就能从 95% 摆到 0%，色带看到的是**占空比**而不是瞬时值；没观测到的时段留空，不连线。")
                 .font(.system(size: 11, design: .rounded))
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -121,14 +130,148 @@ struct GpuHistoryChart: View {
         )
     }
 
-    private func coverageLabel(
-        _ data: (util: [Double?], power: [Double?], temp: [Double?],
-            utilLow: [Double?], utilHigh: [Double?],
-            maxUtil: Double?, maxPower: Double?, maxTemp: Double?)
-    ) -> String {
-        let filled = data.util.compactMap { $0 }.count
-        let total = max(data.util.count, 1)
-        return String(format: "%d/%d 个采样桶有数据（%.0f%%）", filled, total, Double(filled) / Double(total) * 100)
+    // MARK: - 主图（利用率）
+
+    /// 层与层之间的发丝分隔：三块绘图区共用 x 轴，视觉上必须是「分层」而不是
+    /// 「一张图里三条线」——旧版把三者挤进同一量程正是这条没立住。
+    private var layerSeparator: some View {
+        Rectangle()
+            .fill(palette.border.opacity(0.35))
+            .frame(height: 1)
+    }
+
+    /// 左侧 44pt 是全图层共用的标签列（主图 y 轴刻度、细带名称），绘图区从
+    /// 44pt 起——三层绘图区**逐像素同宽**，断口在层间才能对得上。
+    private let labelColumn: CGFloat = 44
+
+    private func mainChart(
+        _ smooth: (util: [Double?], power: [Double?], temp: [Double?],
+            utilLow: [Double?], utilHigh: [Double?])
+    ) -> some View {
+        GeometryReader { proxy in
+            let width = proxy.size.width
+            let plotWidth = width - labelColumn
+            let height: CGFloat = 168
+            ZStack(alignment: .topLeading) {
+                gridlines(width: plotWidth, height: height)
+                    .offset(x: labelColumn)
+
+                envelopePath(low: smooth.utilLow, high: smooth.utilHigh,
+                             width: plotWidth, height: height, y: unitY(height))
+                    .fill(
+                        LinearGradient(
+                            colors: [palette.accent.opacity(0.22), palette.accent.opacity(0.05)],
+                            startPoint: .top, endPoint: .bottom
+                        )
+                    )
+                    .offset(x: labelColumn)
+
+                seriesPath(smooth.util, width: plotWidth, height: height, y: unitY(height))
+                    .stroke(palette.accent, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                    .shadow(color: palette.accent.opacity(0.30), radius: 2.5)
+                    .offset(x: labelColumn)
+
+                axisLabels(plotWidth: plotWidth, height: height)
+            }
+        }
+        .frame(height: 168)
+    }
+
+    /// 0–100 的统一 y 映射（主图专用）。
+    private func unitY(_ height: CGFloat) -> (Double) -> CGFloat {
+        { value in height - height * CGFloat(min(max(value, 0), 100)) / 100 }
+    }
+
+    private func gridlines(width: CGFloat, height: CGFloat) -> some View {
+        ForEach([0, 25, 50, 75, 100], id: \.self) { level in
+            let y = height - height * CGFloat(level) / 100
+            Path { path in
+                path.move(to: CGPoint(x: 0, y: y))
+                path.addLine(to: CGPoint(x: width, y: y))
+            }
+            .stroke(palette.grid.opacity(level == 0 || level == 100 ? 0.9 : 0.55),
+                    style: StrokeStyle(lineWidth: 1))
+        }
+    }
+
+    /// The y scale is written on the left, the actual span on the bottom: without
+    /// the span label a zoomed chart silently claims to be the requested window.
+    private func axisLabels(plotWidth: CGFloat, height: CGFloat) -> some View {
+        let minutes = Int(effectiveWindow / 60)
+        let left: String = minutes >= 120
+            ? String(format: "%.0f 小时前", effectiveWindow / 3600)
+            : "\(max(minutes, 1)) 分钟前"
+        return ZStack(alignment: .topLeading) {
+            VStack(alignment: .leading, spacing: 0) {
+                Text("100%")
+                Spacer(minLength: 0)
+                Text("50%")
+                Spacer(minLength: 0)
+                Text("0")
+            }
+            .frame(width: labelColumn - 6, height: height - 24, alignment: .leading)
+            .offset(y: 2)
+            HStack {
+                Text(left)
+                Spacer()
+                Text("现在")
+            }
+            .frame(width: plotWidth - 24)
+            .position(x: labelColumn + plotWidth / 2, y: height - 6)
+        }
+        .font(.system(size: 10, design: .monospaced))
+        .foregroundStyle(.tertiary)
+        .frame(width: labelColumn + plotWidth, height: height, alignment: .topLeading)
+    }
+
+    // MARK: - 细带（温度 / 功耗，自适应量程）
+
+    /// 一条 36pt 的细带：标题在左上，量程标注在右（上=最大、下=最小），
+    /// 断口与主图同一套规矩。量程按观测 min/max 外扩 12%，全平序列画居中线。
+    private func strip(_ label: String, color: Color, values: [Double?],
+                       format: @escaping (Double) -> String) -> some View {
+        GeometryReader { proxy in
+            let width = proxy.size.width
+            let plotWidth = width - labelColumn
+            let height: CGFloat = 36
+            let observed = values.compactMap { $0 }
+            let low = observed.min() ?? 0
+            let high = max(observed.max() ?? 1, low + 1)
+            let pad = (high - low) * 0.12
+            let scaleLow = low - pad
+            let scaleHigh = high + pad
+            let y: (Double) -> CGFloat = { value in
+                let clamped = min(max(value, scaleLow), scaleHigh)
+                return height - height * CGFloat((clamped - scaleLow) / (scaleHigh - scaleLow))
+            }
+            HStack(alignment: .center, spacing: 0) {
+                Text(label)
+                    .font(.system(size: 10, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .frame(width: labelColumn - 6, alignment: .leading)
+                ZStack(alignment: .topLeading) {
+                    seriesPath(values, width: plotWidth, height: height, y: y)
+                        .stroke(color.opacity(0.9), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+                        .shadow(color: color.opacity(0.25), radius: 1.5)
+                    // 全无观测时（刚装好/引擎一直没上报）没有量程可标，
+                    // 别把「0°/1°」这种占位值当真数据挂出来。
+                    if !observed.isEmpty {
+                        VStack(alignment: .trailing, spacing: 0) {
+                            Text(format(high))
+                            Spacer(minLength: 0)
+                            Text(format(low))
+                        }
+                        .font(.system(size: 9.5, design: .monospaced))
+                        .monospacedDigit()
+                        .foregroundStyle(.tertiary)
+                        .frame(width: 64, alignment: .trailing)
+                        .offset(x: plotWidth - 66)
+                    }
+                }
+                .frame(width: plotWidth, height: height, alignment: .topLeading)
+            }
+        }
+        .frame(height: 36)
     }
 
     private func legendItem(_ label: String, value: String?, color: Color) -> some View {
@@ -143,68 +286,23 @@ struct GpuHistoryChart: View {
         .foregroundStyle(.secondary)
     }
 
-    private func chart(
+    private func coverageLabel(
         _ data: (util: [Double?], power: [Double?], temp: [Double?],
             utilLow: [Double?], utilHigh: [Double?],
             maxUtil: Double?, maxPower: Double?, maxTemp: Double?)
-    ) -> some View {
-        GeometryReader { proxy in
-            let width = proxy.size.width
-            let height: CGFloat = 170
-            ZStack(alignment: .topLeading) {
-                ForEach([0, 25, 50, 75, 100], id: \.self) { level in
-                    let y = height - height * CGFloat(level) / 100
-                    Path { path in
-                        path.move(to: CGPoint(x: 0, y: y))
-                        path.addLine(to: CGPoint(x: width, y: y))
-                    }
-                    .stroke(palette.grid, style: StrokeStyle(lineWidth: 1, dash: [2, 4]))
-                }
-
-                // Secondary series first, so the primary one reads on top of them.
-                seriesPath(data.temp, width: width, height: height)
-                    .stroke(palette.info.opacity(0.7), style: StrokeStyle(lineWidth: 1.2, lineJoin: .round))
-                seriesPath(data.power, width: width, height: height)
-                    .stroke(palette.violet.opacity(0.7), style: StrokeStyle(lineWidth: 1.2, lineJoin: .round))
-
-                envelopePath(low: data.utilLow, high: data.utilHigh, width: width, height: height)
-                    .fill(palette.accent.opacity(0.14))
-                seriesPath(data.util, width: width, height: height)
-                    .stroke(palette.accent, style: StrokeStyle(lineWidth: 1.8, lineJoin: .round))
-
-                axisLabels(width: width, height: height)
-            }
-        }
-        .frame(height: 170)
+    ) -> String {
+        let filled = data.util.compactMap { $0 }.count
+        let total = max(data.util.count, 1)
+        return String(format: "%d/%d 个采样桶有数据（%.0f%%）", filled, total, Double(filled) / Double(total) * 100)
     }
 
-    /// The y scale is written on the left, the actual span on the bottom: without
-    /// the span label a zoomed chart silently claims to be the requested window.
-    private func axisLabels(width: CGFloat, height: CGFloat) -> some View {
-        let minutes = Int(effectiveWindow / 60)
-        let left: String = minutes >= 120
-            ? String(format: "%.0f 小时前", effectiveWindow / 3600)
-            : "\(max(minutes, 1)) 分钟前"
-        return ZStack(alignment: .topLeading) {
-            Text("100%").position(x: 22, y: 8)
-            Text("0").position(x: 12, y: height - 16)
-            HStack {
-                Text(left)
-                Spacer()
-                Text("现在")
-            }
-            .frame(width: width - 24)
-            .position(x: width / 2, y: height - 6)
-        }
-        .font(.system(size: 10, design: .monospaced))
-        .foregroundStyle(.tertiary)
-        .frame(width: width, height: height, alignment: .topLeading)
-    }
+    // MARK: - Path builders
 
     /// One path per series, with a break wherever a bucket has no data. A single
     /// `Path` with `move(to:)` at each gap start is what keeps the line from
     /// bridging the hole.
-    private func seriesPath(_ values: [Double?], width: CGFloat, height: CGFloat) -> Path {
+    private func seriesPath(_ values: [Double?], width: CGFloat, height: CGFloat,
+                            y: (Double) -> CGFloat) -> Path {
         var path = Path()
         guard !values.isEmpty, width > 0 else { return path }
         let step = width / CGFloat(max(values.count - 1, 1))
@@ -214,10 +312,7 @@ struct GpuHistoryChart: View {
                 started = false
                 continue
             }
-            let point = CGPoint(
-                x: CGFloat(index) * step,
-                y: height - height * CGFloat(min(max(value, 0), 100)) / 100
-            )
+            let point = CGPoint(x: CGFloat(index) * step, y: y(value))
             if started {
                 path.addLine(to: point)
             } else {
@@ -230,11 +325,11 @@ struct GpuHistoryChart: View {
 
     /// The min–max band: along the highs, back along the lows, closed. Built per
     /// contiguous run, so a gap is a gap and not a bridge.
-    private func envelopePath(low: [Double?], high: [Double?], width: CGFloat, height: CGFloat) -> Path {
+    private func envelopePath(low: [Double?], high: [Double?], width: CGFloat,
+                              height: CGFloat, y: (Double) -> CGFloat) -> Path {
         var path = Path()
         guard low.count == high.count, !low.isEmpty, width > 0 else { return path }
         let step = width / CGFloat(max(low.count - 1, 1))
-        let y = { (value: Double) in height - height * CGFloat(min(max(value, 0), 100)) / 100 }
         var run: [(x: CGFloat, lo: CGFloat, hi: CGFloat)] = []
         func flush() {
             if run.count > 1 {

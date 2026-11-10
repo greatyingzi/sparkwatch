@@ -339,6 +339,72 @@ final class LedgerStore {
             outputTokens: nil, countEnergy: true, countTokens: false
         )
 
+        // --- GPU 历史：8 小时 × 5 秒网格的真实占空比形状 ---
+        //
+        // 没有 GPU 历史，机器详情页那张图在 demo 里是空网格（预览输出 history=0
+        // 点），图表的任何设计验收都无从谈起。形状按这台机队的实测画像倒灌：
+        // 突发段 util 在 35–97 % 之间以 4–10 s 周期振荡（这就是占空比本体），
+        // GPU 轨 55–95 W、温度向 84 °C 渐近；空闲段 util 0、轨 21–27 W、回落
+        // 47 °C。另有两类「不完美」必须能画出来：整段时间洞（探测没跑/SSH 断）
+        // 和零星单点 nil（采样丢失）——分层图的断口规矩要在假数据上看得见。
+        var historySeed = GpuHistory()
+        var rngH: UInt64 = 0x9E37_79B9_7F4A_7C15
+        func nextH01() -> Double {
+            rngH = rngH &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+            return Double((rngH >> 11) & ((1 << 53) - 1)) / Double(1 << 53)
+        }
+        let step = 5.0
+        // 与上面 token 播种同一组固定节点 ID（demo 机队的 spark-00/01）。
+        for nodeID in [
+            UUID(uuidString: "00000000-0000-4000-8000-000000000000")!,
+            UUID(uuidString: "00000000-0000-4000-8000-000000000001")!,
+        ] {
+            var t = now.addingTimeInterval(-8 * 3600)
+            var burstLeft = 0.0
+            var burstPeriod = 6.0
+            var burstBase = 70.0
+            var gapLeft = 0.0
+            var temp = 46.0
+            while t < now {
+                if gapLeft > 0 {
+                    gapLeft -= step
+                    t = t.addingTimeInterval(step)
+                    continue   // 时间洞：整段不记点，图上必须是断口而不是连线
+                }
+                let roll = nextH01()
+                if burstLeft <= 0, roll < 0.02 {
+                    burstLeft = 60 + nextH01() * 420
+                    burstPeriod = 4 + nextH01() * 6
+                    burstBase = 62 + nextH01() * 33
+                }
+                if burstLeft <= 0, roll > 0.995 { gapLeft = 60 + nextH01() * 300 }
+                let util: Double?
+                let power: Double
+                let clock: Double
+                if burstLeft > 0 {
+                    burstLeft -= step
+                    let wobble = 0.5 + 0.5 * sin(2 * .pi * t.timeIntervalSince1970 / burstPeriod)
+                    let u = min(97, max(35, burstBase * (0.55 + 0.45 * wobble)))
+                    util = u
+                    power = 22 + u / 100 * 68 + nextH01() * 4
+                    temp += (72 + u / 100 * 12 - temp) * 0.01
+                    clock = 2380 + nextH01() * 90
+                } else {
+                    util = nextH01() < 0.02 ? nil : 0
+                    power = 21 + nextH01() * 6
+                    temp += (47 - temp) * 0.01
+                    clock = 1500 + nextH01() * 60
+                }
+                historySeed.record(
+                    .init(at: t, utilPct: util, powerW: power, tempC: temp,
+                          acpitzC: temp + 8, smClockMHz: clock),
+                    nodeID: nodeID
+                )
+                t = t.addingTimeInterval(step)
+            }
+        }
+        self.history = historySeed
+
         self.tokens = tokens
         self.energy = energy
     }

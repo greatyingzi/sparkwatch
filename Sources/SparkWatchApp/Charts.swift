@@ -49,6 +49,33 @@ struct GpuHistoryChart: View {
     /// 十字线当前吸附的采样桶。nil = 鼠标不在图上。三层共用同一个状态：
     /// x 轴对齐后，悬停任何一层，线在三层同时动。
     @State private var hoverIndex: Int?
+    /// 十字线的**连续** x（绘图区坐标）。线滑而不跳（C4）；读数与色点仍吸附
+    /// hoverIndex 对应的真实桶——两条链各司其职，数值永远是测过的。
+    @State private var hoverX: CGFloat?
+    /// 悬停离开后的延迟清空任务。见 setHover 的注释——这是跨层不闪断的关键。
+    @State private var hoverClearTask: Task<Void, Never>?
+
+    /// 悬停状态的**唯一入口**（三层共用）。**延迟清空**是跨层不闪断的关键
+    ///（主人真机实测的痛点）：鼠标掠过层间的分隔线/间隙时，会先收到上一层的
+    /// ended、再收到下一层的 active——若 ended 立即清空，十字线就消失又出现。
+    /// 这里挂起 180ms 的清空任务，下一层 active 一到就取消它；真正离开整块图
+    /// （180ms 内无任何 active）才收线。
+    private func setHover(_ x: CGFloat?, plotWidth: CGFloat) {
+        hoverClearTask?.cancel()
+        hoverClearTask = nil
+        guard let x else {
+            hoverClearTask = Task {
+                try? await Task.sleep(for: .milliseconds(180))
+                guard !Task.isCancelled else { return }
+                hoverIndex = nil
+                hoverX = nil
+            }
+            return
+        }
+        let clamped = min(max(x, 0), plotWidth)
+        hoverX = clamped
+        hoverIndex = Self.bucketIndex(x: clamped, plotWidth: plotWidth, count: bucketCount)
+    }
 
     private var available: TimeInterval { model.historySpan(for: nodeID) }
 
@@ -65,6 +92,10 @@ struct GpuHistoryChart: View {
     private var bucketSeconds: Double { scale.bucketSeconds }
     private var zoomed: Bool { scale.zoomed }
 
+    /// 每次 body 求值都重算（含每次悬停移动）：30min 窗 ~360 点、8h 窗 ~5.8k 点，
+    /// 单趟分桶 + 3×90 桶平滑都在亚毫秒量级，悬停事件又按显示刷新率合并——
+    /// 不值得为此加缓存层（缓存失效时机比这点算力更容易出错）。点数上到数万
+    /// 再考虑 keyed 缓存，失效键 = (nodeID, bucketCount, 最新采样时刻)。
     private var series: (util: [Double?], power: [Double?], temp: [Double?],
         utilLow: [Double?], utilHigh: [Double?],
         maxUtil: Double?, maxPower: Double?, maxTemp: Double?)
@@ -168,26 +199,24 @@ struct GpuHistoryChart: View {
                 axisLabels(plotWidth: plotWidth, height: height)
 
                 if let index = hoverIndex {
-                    crosshair(index: index, plotWidth: plotWidth, height: height)
+                    // 线连续跟随鼠标（滑而不跳）；点与读数吸附真实桶。
+                    crosshair(x: hoverX ?? xPosition(index, plotWidth: plotWidth), height: height)
                         .offset(x: labelColumn)
                     if let value = data.util.indices.contains(index) ? data.util[index] : nil {
                         markerDot(color: palette.accent, x: xPosition(index, plotWidth: plotWidth),
                                   y: unitY(height)(value))
                             .offset(x: labelColumn)
                     }
-                    readoutBox(data, index: index)
-                        .frame(width: plotWidth, height: height, alignment: .topTrailing)
+                    readoutBox(data, index: index, plotWidth: plotWidth)
                         .allowsHitTesting(false)
                 }
             }
             .onContinuousHover { phase in
                 switch phase {
                 case .active(let hover):
-                    hoverIndex = Self.bucketIndex(
-                        x: hover.x - labelColumn, plotWidth: plotWidth, count: bucketCount
-                    )
+                    setHover(hover.x - labelColumn, plotWidth: plotWidth)
                 case .ended:
-                    hoverIndex = nil
+                    setHover(nil, plotWidth: plotWidth)
                 @unknown default:
                     break
                 }
@@ -225,12 +254,13 @@ struct GpuHistoryChart: View {
         return CGFloat(index) * plotWidth / CGFloat(bucketCount - 1)
     }
 
-    /// 十字线：一条 1pt 纵线贯穿该层绘图区。
-    private func crosshair(index: Int, plotWidth: CGFloat, height: CGFloat) -> some View {
+    /// 十字线：纵线**连续跟随鼠标 x**（滑而不跳）；读数与色点才吸附桶。
+    /// 颜色用 textStrong：暗色近白、浅色近黑，两主题都醒目。
+    private func crosshair(x: CGFloat, height: CGFloat) -> some View {
         Rectangle()
-            .fill(palette.mutedStrong.opacity(0.45))
-            .frame(width: 1, height: height)
-            .offset(x: xPosition(index, plotWidth: plotWidth))
+            .fill(palette.textStrong.opacity(0.55))
+            .frame(width: 1.5, height: height)
+            .offset(x: x)
     }
 
     private func markerDot(color: Color, x: CGFloat, y: CGFloat) -> some View {
@@ -240,13 +270,15 @@ struct GpuHistoryChart: View {
             .position(x: x, y: y)
     }
 
-    /// 悬停读数浮层：固定右上（跟随式会抖、还会盖住线）。全部取**原始桶值**——
-    /// 绘制层是平滑过的，精确值只在这里，两条信息链互不冒充。
+    /// 悬停读数浮层：默认右上；悬停点进入右侧 30% 区域时**翻到线左侧**
+    ///（别盖住十字线与色点）。全部取**原始桶值**——绘制层是平滑过的，
+    /// 精确值只在这里，两条信息链互不冒充。
     private func readoutBox(
         _ data: (util: [Double?], power: [Double?], temp: [Double?],
             utilLow: [Double?], utilHigh: [Double?],
             maxUtil: Double?, maxPower: Double?, maxTemp: Double?),
-        index: Int
+        index: Int,
+        plotWidth: CGFloat
     ) -> some View {
         let util = data.util.indices.contains(index) ? data.util[index] : nil
         let low = data.utilLow.indices.contains(index) ? data.utilLow[index] : nil
@@ -256,6 +288,12 @@ struct GpuHistoryChart: View {
         // 桶中心时刻：最新桶 ≈ 现在，往前每桶退 bucketSeconds。
         let offset = effectiveWindow - (Double(index) + 0.5) * bucketSeconds
         let at = Date().addingTimeInterval(-offset)
+        let boxWidth: CGFloat = 148
+        // 右侧 30% 区域翻面：浮层右缘贴到十字线左侧 10pt。
+        let flipped = Double(index) > Double(bucketCount) * 0.7
+        let x: CGFloat = flipped
+            ? max(8, xPosition(index, plotWidth: plotWidth) - boxWidth - 10)
+            : plotWidth - boxWidth - 8
         return VStack(alignment: .leading, spacing: 4) {
             Text(Self.clockFormatter.string(from: at))
                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
@@ -270,12 +308,21 @@ struct GpuHistoryChart: View {
                        value: temp.map { String(format: "%.0f°", $0) } ?? "—", sub: nil)
             readoutRow(color: palette.violet, label: "功耗",
                        value: power.map { String(format: "%.0f W", $0) } ?? "—", sub: nil)
+            if util == nil && temp == nil && power == nil {
+                // 三个序列都没观测（时间洞/保留期外）：明说，而不是一排「—」让人猜。
+                Text("无观测")
+                    .font(.system(size: 9.5, design: .rounded))
+                    .foregroundStyle(.tertiary)
+            }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
+        .frame(width: boxWidth, alignment: .topLeading)
         .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(palette.surface))
         .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
             .strokeBorder(palette.border, lineWidth: 1))
+        .shadow(color: .black.opacity(0.22), radius: 3, y: 1)
+        .offset(x: x)
     }
 
     private func readoutRow(color: Color, label: String, value: String, sub: String?) -> some View {
@@ -284,7 +331,7 @@ struct GpuHistoryChart: View {
             Text(label).font(.system(size: 10, design: .rounded)).foregroundStyle(.secondary)
             Spacer(minLength: 6)
             Text(value)
-                .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
                 .monospacedDigit()
                 .foregroundStyle(palette.textStrong)
             if let sub {
@@ -382,7 +429,7 @@ struct GpuHistoryChart: View {
                         .offset(x: plotWidth - 66)
                     }
                     if let index = hoverIndex {
-                        crosshair(index: index, plotWidth: plotWidth, height: height)
+                        crosshair(x: hoverX ?? xPosition(index, plotWidth: plotWidth), height: height)
                         if let value = values.indices.contains(index) ? values[index] : nil {
                             markerDot(color: color, x: xPosition(index, plotWidth: plotWidth),
                                       y: y(value))
@@ -394,11 +441,9 @@ struct GpuHistoryChart: View {
             .onContinuousHover { phase in
                 switch phase {
                 case .active(let hover):
-                    hoverIndex = Self.bucketIndex(
-                        x: hover.x - labelColumn, plotWidth: plotWidth, count: bucketCount
-                    )
+                    setHover(hover.x - labelColumn, plotWidth: plotWidth)
                 case .ended:
-                    hoverIndex = nil
+                    setHover(nil, plotWidth: plotWidth)
                 @unknown default:
                     break
                 }

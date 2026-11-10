@@ -776,15 +776,33 @@ struct MachinePanels: View {
 
 // MARK: - Daily bars
 //
-// One bar per bucket, used by both the energy page (24 hours) and the token page
-// (14 days). Two callers with the same job share one implementation so the two
-// charts cannot drift apart in how they show a gap: a bucket with no data draws a
-// stub, not a zero-height bar that reads as "measured zero".
+// One bar per bucket, shared by the energy page (24 hours), the token page
+// (14 days) and the two day-detail mini charts. Two callers with the same job
+// share one implementation so the charts cannot drift apart in how they show a
+// gap: a bucket with no data draws a stub, not a zero-height bar that reads as
+// "measured zero".
+//
+// 交互规矩（一次实现，两张图与详情迷你柱共用）：
+//   * `id` 是**稳定身份**（日期串/小时标签），不用 UUID 默认值——选中态、悬停
+//     chip、出现动画都要跨刷新认得同一根柱，否则每次 mirror 都整排重画。
+//   * `valueText` 由调用方格式化，组件不知道单位（token 是 k/M/B，能耗是 W/kWh）。
+//   * `showValues` 常驻柱顶数值；顶部预留 ~16pt 头空，否则 10pt 数字会被外层
+//     frame 裁掉。能耗 24h 图柱多（31 根太密放不下数字），关掉它、靠悬停 chip。
+//   * `selection` 点击选中（再点同一根取消）；nil = 纯展示（详情迷你柱不可点）。
 struct DailyBars: View {
     struct Bar: Identifiable {
-        var id = UUID()
+        /// 堆叠段（自上而下 = 调用方图例顺序）。nil = 单色柱。
+        /// value 始终是**合计**：柱高与柱顶数值都按它算，段只负责回答“谁占的”。
+        struct Part {
+            var value: Double
+            var color: Color
+        }
+
+        var id: String
         var label: String
         var value: Double?
+        var valueText: String?
+        var parts: [Part]? = nil
         var help: String
     }
 
@@ -794,27 +812,30 @@ struct DailyBars: View {
     var height: CGFloat = 64
     /// Highlight the last bar (it is "now", or today, and is usually partial).
     var highlightLast = true
+    /// 柱顶常驻显示 valueText。value == nil（无记录）或 valueText == nil 不显示。
+    var showValues = false
+    /// 点击柱切换选中。nil = 不可点。
+    var selection: Binding<String?>? = nil
+
+    /// 悬停中的柱 id。悬停浮出数值 chip——**即使 !showValues 也显示**，
+    /// 能耗 24h 图没有任何常驻数值，全靠它。
+    @State private var hovered: String?
 
     private var peak: Double {
         max(bars.compactMap { $0.value }.max() ?? 1, 1)
     }
 
+    /// 柱顶数值占的那一截；只在 showValues 时预留，不白占高度。
+    private var headroom: CGFloat { showValues ? 16 : 0 }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .bottom, spacing: 3) {
                 ForEach(Array(bars.enumerated()), id: \.element.id) { index, bar in
-                    let fraction = (bar.value ?? 0) / peak
-                    RoundedRectangle(cornerRadius: 3, style: .continuous)
-                        .fill(
-                            highlightLast && index == bars.count - 1
-                                ? tint
-                                : tint.opacity(bar.value == nil ? 0.12 : 0.45)
-                        )
-                        .frame(height: bar.value == nil ? 3 : max(4, height * fraction))
-                        .help(bar.help)
+                    column(index: index, bar: bar)
                 }
             }
-            .frame(height: height, alignment: .bottom)
+            .frame(height: height + headroom, alignment: .bottom)
 
             if bars.count > 1 {
                 HStack {
@@ -828,6 +849,118 @@ struct DailyBars: View {
                 .foregroundStyle(.tertiary)
             }
         }
+    }
+
+    @ViewBuilder
+    private func column(index: Int, bar: Bar) -> some View {
+        let isSelected = selection?.wrappedValue == bar.id
+        let isStub = bar.value == nil
+        let fraction = (bar.value ?? 0) / peak
+        VStack(spacing: 2) {
+            if showValues, bar.value != nil, let valueText = bar.valueText {
+                Text(valueText)
+                    .font(.system(size: 10, design: .monospaced))
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+                    .foregroundStyle(isSelected ? palette.textStrong : palette.mutedStrong)
+                    // 数值不吃手势：点击目标始终是柱。
+                    .allowsHitTesting(false)
+            }
+            barShape(index: index, bar: bar, isSelected: isSelected)
+                .frame(height: isStub ? 3 : max(4, height * fraction))
+                .overlay {
+                    // 选中柱全不透明 + 描边；描边画在内沿（strokeBorder）不增宽布局。
+                    if isSelected {
+                        RoundedRectangle(cornerRadius: 3, style: .continuous)
+                            .strokeBorder(tint, lineWidth: 1.5)
+                    }
+                }
+                .overlay(alignment: .top) {
+                    if hovered == bar.id, let chip = chipText(bar) {
+                        valueChip(chip)
+                            // 浮在柱顶上方，不挤占布局；被 showValues 的常驻数字
+                            // 盖住也算对——chip 是更近一层的同一信息。
+                            .offset(y: -16)
+                    }
+                }
+                .help(bar.help)
+        }
+        .contentShape(Rectangle())
+        .onHover { on in
+            if on {
+                hovered = bar.id
+            } else if hovered == bar.id {
+                hovered = nil
+            }
+        }
+        .onTapGesture {
+            guard let selection else { return }
+            selection.wrappedValue = isSelected ? nil : bar.id
+        }
+    }
+
+    /// 柱体：带 parts 走堆叠，否则单色。高度/描边/chip/help 都挂在外层，这里只出形状。
+    @ViewBuilder
+    private func barShape(index: Int, bar: Bar, isSelected: Bool) -> some View {
+        if let parts = bar.parts, bar.value != nil {
+            stackedBar(parts: parts, fraction: (bar.value ?? 0) / peak,
+                       isToday: highlightLast && index == bars.count - 1)
+        } else {
+            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                .fill(barFill(index: index, isStub: bar.value == nil, isSelected: isSelected,
+                              isHovered: hovered == bar.id))
+        }
+    }
+
+    /// 堆叠柱：段序 = 图例顺序（自上而下），段间 1pt 缝（对齐 SegBar 的分段缝规矩），
+    /// 外缘统一圆角，各段高度严格按值占比（min 1.5pt 只为极小段可见）。
+    /// 「今天」不降透明度、其余日子 0.85——沿用单色柱「今天更亮」的同一语言。
+    private func stackedBar(parts: [Bar.Part], fraction: Double, isToday: Bool) -> some View {
+        let barHeight = max(4, height * fraction)
+        let total = max(1, parts.reduce(0) { $0 + max(0, $1.value) })
+        let gap: CGFloat = 1
+        let usable = barHeight - gap * CGFloat(max(0, parts.count - 1))
+        return VStack(spacing: gap) {
+            ForEach(Array(parts.enumerated()), id: \.offset) { _, part in
+                if part.value > 0 {
+                    Rectangle()
+                        .fill(part.color)
+                        .frame(height: max(1.5, usable * CGFloat(max(0, part.value) / total)))
+                }
+            }
+        }
+        .frame(height: barHeight, alignment: .bottom)
+        .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+        .opacity(isToday ? 1 : 0.85)
+    }
+
+    private func barFill(index: Int, isStub: Bool, isSelected: Bool, isHovered: Bool) -> Color {
+        if isSelected { return tint }
+        if highlightLast && index == bars.count - 1 { return tint }
+        if isStub { return tint.opacity(0.12) }
+        return tint.opacity(isHovered ? 0.65 : 0.45)
+    }
+
+    /// chip 文本：优先调用方格式化过的 valueText；没给（详情迷你柱）就退回
+    /// 紧凑数字，保证悬停总能读到一个量级。value == nil 没有可读的数，不出 chip
+    /// （.help 里已有「无记录/无覆盖」的解释）。
+    private func chipText(_ bar: Bar) -> String? {
+        if let valueText = bar.valueText { return valueText }
+        return bar.value.map { compactTokens($0) }
+    }
+
+    private func valueChip(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+            .monospacedDigit()
+            .lineLimit(1)
+            .fixedSize()
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(palette.surface))
+            .overlay(Capsule().strokeBorder(palette.border, lineWidth: 1))
+            .foregroundStyle(palette.textStrong)
     }
 }
 

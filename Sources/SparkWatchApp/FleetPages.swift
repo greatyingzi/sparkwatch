@@ -111,6 +111,7 @@ struct EnergyPage: View {
                     "\(model.nodes.count) 台机器",
                     snapshot.map { String(format: "24 小时覆盖 %.0f%%", $0.coverage24h * 100) } ?? "等待数据",
                     "估算值，非墙上功率计",
+                    "按本地日聚合",
                 ],
                 palette: palette
             )
@@ -145,6 +146,8 @@ struct EnergyPage: View {
                     }
                 }
             }
+
+            dailyPanel
 
             HStack(alignment: .top, spacing: 14) {
                 statPanel(
@@ -184,8 +187,11 @@ struct EnergyPage: View {
             bars: model.hourlyWatts.enumerated().map { index, watts in
                 let hoursAgo = model.hourlyWatts.count - 1 - index
                 return DailyBars.Bar(
+                    id: "h\(hoursAgo)",
                     label: hoursAgo == 0 ? "现在" : "\(hoursAgo) 小时前",
                     value: watts,
+                    // 24 根柱放不下常驻数字：数值走悬停 chip（DailyBars 的规矩）。
+                    valueText: watts.map { String(format: "%.0f W", $0) },
                     help: watts.map { String(format: "%@ · %.0f W", hourLabel(index), $0) }
                         ?? "\(hourLabel(index)) · 无完整覆盖"
                 )
@@ -193,6 +199,62 @@ struct EnergyPage: View {
             tint: palette.accent,
             palette: palette
         )
+    }
+
+    /// 按天（31 天）：柱顶 kWh 数字、点击下钻当天详情。
+    ///
+    /// 单位只在角标与脚注里出现一次——31 根柱每根都缀个"kWh"就是噪声；
+    /// valueText 只写数字（`%.1f`）。
+    private var dailyPanel: some View {
+        Panel(title: "按天（31 天）", palette: palette, trailing: AnyView(
+            Text("单位 kWh · 本地日边界")
+                .font(.system(size: 11, design: .rounded))
+                .foregroundStyle(.tertiary)
+        )) {
+            VStack(alignment: .leading, spacing: 8) {
+                if model.energyDaily.allSatisfy({ $0.kwh == nil }) {
+                    Text("还没有跨天的能耗记录。能耗按分钟桶积分、按本地日聚合展示（保留 31 天）；整机的瓦数是模型估算，不是测量值。")
+                        .font(.system(size: 12, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    DailyBars(
+                        bars: model.energyDaily.map { entry in
+                            DailyBars.Bar(
+                                id: entry.day,
+                                label: shortDay(entry.day),
+                                // kwh == nil ⇔ 那天无覆盖：画小竖条，不是零高柱。
+                                value: entry.kwh,
+                                valueText: entry.kwh.map { String(format: "%.1f", $0) },
+                                help: entry.kwh.map {
+                                    "\(entry.day) · \(String(format: "%.1f", $0)) kWh · 覆盖 \(String(format: "%.0f%%", entry.coverage * 100)) · 点按看当天"
+                                } ?? "\(entry.day) · 无覆盖"
+                            )
+                        },
+                        tint: palette.accent,
+                        palette: palette,
+                        showValues: true,
+                        selection: Binding(
+                            get: { model.selectedEnergyDay },
+                            set: { model.setEnergyDay($0) }
+                        )
+                    )
+                    Text("最后一根是今天（未结束）。柱顶是当天 kWh；点某根柱看当天详情，再点一次或 ✕ 收起。没有覆盖的那天画成小竖条，而不是零高。")
+                        .font(.system(size: 11.5, design: .rounded))
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                // 选中即面板，不弹窗：详情内联在图下方展开。
+                if let detail = model.energyDayDetail {
+                    EnergyDayDetailPanel(detail: detail, palette: palette) {
+                        model.setEnergyDay(nil)
+                    }
+                }
+            }
+            // 动画只跟「选中哪天」走；挂在数据 tick 上会每 2s 闪一次。
+            .animation(.easeOut(duration: 0.2), value: model.selectedEnergyDay)
+        }
     }
 
     private func hourLabel(_ index: Int) -> String {
@@ -230,7 +292,7 @@ struct TokenPage: View {
                 meta: [
                     "\(model.nodes.count) 个端点",
                     "按引擎累计计数器差分记账",
-                    "UTC 日边界",
+                    "本地日边界（账本内部 UTC 小时桶）",
                 ],
                 palette: palette,
                 trailing: AnyView(rangePicker)
@@ -270,7 +332,7 @@ struct TokenPage: View {
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     } else {
-                        table
+                        TokenModelTable(rows: model.tokenRows, palette: palette)
                     }
                     Text("合计 \(compactTokens(grand)) · 缓存命中省下的 prefill 就是这一栏与「实际计算」的差")
                         .font(.system(size: 11.5, design: .rounded))
@@ -279,36 +341,82 @@ struct TokenPage: View {
             }
 
             Panel(title: "按天", palette: palette, trailing: AnyView(
-                Text("最近 14 天 · UTC 日")
+                Text("最近 14 天 · 本地日边界（账本内部 UTC 小时桶）")
                     .font(.system(size: 11, design: .rounded))
                     .foregroundStyle(.tertiary)
             )) {
                 VStack(alignment: .leading, spacing: 8) {
-                    if model.tokenDaily.allSatisfy({ $0.completion == 0 }) {
-                        Text("还没有跨天的记录。账本按 UTC 日分桶、保留 35 天；只记增量 —— 引擎重启或换模型时重新取基线，不会把差值算成流量。")
+                    if model.tokenDaily.allSatisfy({ !$0.hasData }) {
+                        Text("还没有跨天的记录。账本按 UTC 小时桶存、此处按本地日聚合，保留 35 天；只记增量 —— 引擎重启或换模型时重新取基线，不会把差值算成流量。")
                             .font(.system(size: 12, design: .rounded))
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     } else {
                         DailyBars(
                             bars: model.tokenDaily.map { entry in
-                                DailyBars.Bar(
+                                // 三段堆叠，段序与图例一致（生成/缓存命中/实际计算 prefill）。
+                                // value = 合计：柱高与柱顶数字都是「那天总量」，段只回答“谁占的”。
+                                let uncached = max(0, entry.prompt - entry.cached)
+                                let grand = entry.completion + entry.cached + uncached
+                                return DailyBars.Bar(
+                                    id: entry.day,
                                     label: shortDay(entry.day),
-                                    value: entry.completion,
-                                    help: "\(entry.day) · 生成 \(compactTokens(entry.completion)) token"
+                                    // hasData == false 是「那天没有任何记录」：画小竖条。
+                                    // 把 0 当真值画柱，就是「没记录」冒充「测得为零」。
+                                    value: entry.hasData ? grand : nil,
+                                    valueText: entry.hasData ? compactTokens(grand) : nil,
+                                    parts: entry.hasData ? [
+                                        .init(value: entry.completion, color: palette.accent),
+                                        .init(value: entry.cached, color: palette.info),
+                                        .init(value: uncached, color: palette.violet),
+                                    ] : nil,
+                                    help: entry.hasData
+                                        ? "\(entry.day) · 生成 \(compactTokens(entry.completion)) · 缓存命中 \(compactTokens(entry.cached)) · 实际计算 prefill \(compactTokens(uncached)) · 点按看当天"
+                                        : "\(entry.day) · 无记录"
                                 )
                             },
                             tint: palette.accent,
-                            palette: palette
+                            palette: palette,
+                            showValues: true,
+                            selection: Binding(
+                                get: { model.selectedTokenDay },
+                                set: { model.setTokenDay($0) }
+                            )
                         )
-                        Text("最后一根是今天（未结束）。柱高按这 14 天里的最大值归一；没有记录的那天画成小竖条，而不是零高。")
+                        HStack(spacing: 12) {
+                            legendDot(palette.accent, "生成")
+                            legendDot(palette.info, "缓存命中")
+                            legendDot(palette.violet, "实际计算 prefill")
+                            Spacer(minLength: 0)
+                        }
+                        Text("柱高是当天合计（生成 + 缓存命中 + 实际计算 prefill），分段颜色见图例；最后一根是今天（未结束）。点某根柱看当天详情，再点一次或 ✕ 收起。没有记录的那天画成小竖条，而不是零高。")
                             .font(.system(size: 11.5, design: .rounded))
                             .foregroundStyle(.tertiary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
+
+                    // 选中即面板，不弹窗：详情内联在图下方展开，保留上下文。
+                    if let detail = model.tokenDayDetail {
+                        TokenDayDetailPanel(detail: detail, palette: palette) {
+                            model.setTokenDay(nil)
+                        }
+                    }
                 }
+                // 动画只跟「选中哪天」走；挂在数据 tick 上会每 2s 闪一次。
+                .animation(.easeOut(duration: 0.2), value: model.selectedTokenDay)
             }
         }
+    }
+
+    /// 按天图的小图例：三个色点 + 名称，与柱内分段一一对应。
+    private func legendDot(_ color: Color, _ label: String) -> some View {
+        HStack(spacing: 4) {
+            RoundedRectangle(cornerRadius: 1.5).fill(color).frame(width: 7, height: 7)
+            Text(label)
+                .font(.system(size: 10.5, design: .rounded))
+                .foregroundStyle(.secondary)
+        }
+        .fixedSize()
     }
 
     private var rangePicker: some View {
@@ -325,64 +433,6 @@ struct TokenPage: View {
         .frame(width: 380)
     }
 
-    /// 数字列宽：只用来对齐，不当作硬约束。
-    private static let numberColumn: CGFloat = 74
-
-    /// 一个数字格：**永远单行**。
-    ///
-    /// 原来只写 `.frame(width: 70, alignment: .trailing)`，窗口一窄 SwiftUI 会把这几个
-    /// "固定宽"一起压缩，数字于是**折到第二行** —— 用户报的「token 这里数字都换行了」。
-    /// 实测 900 pt 宽时最后那一列直接看不见，中间还飘出 `20M` / `236.1k` 这样的碎片。
-    /// 所以：`lineLimit(1)` 保证不折行，`minimumScaleFactor` 允许在极窄时缩一点字号，
-    /// `layoutPriority(1)` 让**被压的是模型名**（它本来就按中间省略号截断，那才是该让位的列）。
-    private func numberCell(_ text: String) -> some View {
-        Text(text)
-            .lineLimit(1)
-            .minimumScaleFactor(0.75)
-            .frame(width: Self.numberColumn, alignment: .trailing)
-            .layoutPriority(1)
-    }
-
-    private var table: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Text("模型").frame(maxWidth: .infinity, alignment: .leading)
-                numberCell("缓存")
-                numberCell("prefill")
-                numberCell("生成")
-            }
-            .font(.system(size: 10.5, weight: .semibold, design: .rounded))
-            .textCase(.uppercase)
-            .tracking(0.8)
-            .foregroundStyle(.tertiary)
-            .padding(.vertical, 5)
-
-            ForEach(model.tokenRows, id: \.model) { row in
-                HStack(spacing: 8) {
-                    Text(row.model)
-                        .font(.system(size: 12.5, design: .rounded))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    if row.seriesCount > 1 {
-                        Text("×\(row.seriesCount)")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
-                            .fixedSize()
-                    }
-                    numberCell(row.cached > 0 ? compactTokens(row.cached) : "—")
-                    numberCell(compactTokens(max(0, row.prompt - row.cached)))
-                    numberCell(compactTokens(row.completion))
-                        .font(.system(size: 12.5, weight: .semibold, design: .monospaced))
-                }
-                .font(.system(size: 12.5, design: .monospaced))
-                .foregroundStyle(palette.mutedStrong)
-                .padding(.vertical, 5)
-                .overlay(alignment: .top) { Divider() }
-            }
-        }
-    }
 }
 
 /// `2026-10-10` → `10/10`: the axis has three labels and no room for a year.

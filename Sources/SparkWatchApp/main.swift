@@ -917,6 +917,11 @@ if let index = CommandLine.arguments.firstIndex(of: "--preview-main"),
     let height = CommandLine.arguments.firstIndex(of: "--height").flatMap { position in
         position + 1 < CommandLine.arguments.count ? Double(CommandLine.arguments[position + 1]) : nil
     } ?? 900
+    // --select-day <yyyy-MM-dd>：渲染前选中某天（两张按天图共用该参数），让
+    // 「点柱看当天详情」的验收不依赖人手点击。数据就绪后 setTokenDay/setEnergyDay。
+    let selectDay = CommandLine.arguments.firstIndex(of: "--select-day").flatMap { position in
+        position + 1 < CommandLine.arguments.count ? CommandLine.arguments[position + 1] : nil
+    }
     application.setActivationPolicy(.accessory)
     Task { @MainActor in
         let model = AppModel(collector: ClusterCollector(), readOnlyLedgers: true)
@@ -948,6 +953,10 @@ if let index = CommandLine.arguments.firstIndex(of: "--preview-main"),
                     + " watts=\(model.energySnapshot?.currentWatts.map { String(format: "%.0f", $0) } ?? "-")"
                     + " coverage24h=\(model.energySnapshot.map { String(format: "%.3f", $0.coverage24h) } ?? "-")")
             }
+        }
+        if let selectDay {
+            model.setTokenDay(selectDay)
+            model.setEnergyDay(selectDay)
         }
         if let theme = previewThemeOverride() {
             model.overrideTheme(theme)

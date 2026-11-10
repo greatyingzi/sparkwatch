@@ -50,6 +50,10 @@ final class LedgerStore {
     /// two seconds it just collected.
     private let readOnly: Bool
 
+    /// 只读标记的对外读法：demo 播种只应发生在只读实例上——预览/CLI 的 save()
+    /// 是 no-op，种子只活在内存；可写实例会把种子随 save() 写进真实账本文件。
+    var isReadOnly: Bool { readOnly }
+
     init(readOnly: Bool = false) {
         self.readOnly = readOnly
         load()
@@ -212,6 +216,131 @@ final class LedgerStore {
             nodeID: node?.id, nodeName: node?.name, message: message
         ))
         save(force: true)
+    }
+
+    // MARK: - Demo seeding（预览/演示专用）
+    //
+    // --demo-devices 的机队是合成的，但 token/能耗两张按天图需要**跨天**的账本
+    // 才有东西可画：demo 模式不跑 record()，预览进程里也没有几天可攒的历史。
+    // 这里按真实口径倒灌——token 走 observe() 的差分计数器（计数器沿时间单调
+    // 递增，满足「只记增量」的前提），能耗走 seedBucket() 的分钟桶（契约注明
+    // **seedBucket 不 prune，调用方收尾**）。
+    //
+    // 随机数用固定种子的 LCG 而不是 Double.random：demo 渲染必须可复现，
+    // 否则每次截图数字都不一样，「表格合计与柱值一致」这类验收没法比对。
+    //
+    // 只动内存；调用方保证只在 readOnly 实例上调。
+    func seedDemoHistory(now: Date) {
+        var tokens = TokenLedger()
+        var energy = EnergyLedger()
+        let calendar = Calendar.current
+
+        var rng: UInt64 = 0x5DEECE66D
+        func next01() -> Double {
+            rng = rng &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+            return Double((rng >> 11) & ((1 << 53) - 1)) / Double(1 << 53)
+        }
+
+        // --- token：3 条 series / 2 个模型，沿 30 个本地天铺差分计数器 ---
+        //
+        // 模型 A 在两台机器各一条 series（当日表里出 ×2），模型 B 一条；
+        // 中间留一天整机没跑——「没有记录的那天」必须在 demo 里看得见。
+        let series: [(nodeID: UUID, port: Int, model: String)] = [
+            (UUID(uuidString: "00000000-0000-4000-8000-000000000000")!, 8888, "GLM-5.3-Flash-EXL3"),
+            (UUID(uuidString: "00000000-0000-4000-8000-000000000001")!, 8889, "GLM-5.3-Flash-EXL3"),
+            (UUID(uuidString: "00000000-0000-4000-8000-000000000000")!, 8000, "Qwen3-Coder-30B"),
+        ]
+        let tokenGapDay = 12
+        var counters = [(prompt: Double, completion: Double, cached: Double)](
+            repeating: (0, 0, 0), count: series.count
+        )
+        // observe() 首见只取基线不记账：先在窗口外埋一次 0 基线，之后的每次调用
+        // 才有增量可记。
+        let baselineAt = calendar.date(
+            byAdding: .day, value: -31, to: calendar.startOfDay(for: now)
+        ) ?? now.addingTimeInterval(-31 * 86400)
+        for entry in series {
+            tokens.observe(
+                nodeID: entry.nodeID, port: entry.port, model: entry.model,
+                prompt: 0, completion: 0, cached: 0, at: baselineAt
+            )
+        }
+        for dayOffset in stride(from: 29, through: 0, by: -1) {
+            if dayOffset == tokenGapDay { continue }
+            let dayStart = calendar.startOfDay(for: now.addingTimeInterval(-Double(dayOffset) * 86400))
+            // 「今天」只铺已过去的整点：未来小时没有记录，最后一根柱是半天的。
+            let lastHour = dayOffset == 0 ? calendar.component(.hour, from: now) : 24
+            let span = max(1, lastHour)
+            let targetHours = min(8 + Int(next01() * 13), span)   // 每天 8…20 个小时
+            var hours = Set<Int>()
+            for hour in 0..<span where next01() < 0.62 { hours.insert(hour) }
+            while hours.count < targetHours {
+                hours.insert(Int(next01() * Double(span)) % span)
+            }
+            for (index, entry) in series.enumerated() {
+                // 模型 B 的 series 不是天天醒着——真实机队也不是。
+                if index == 2, next01() < 0.2 { continue }
+                for hour in hours.sorted() {
+                    let minute = Int(next01() * 60)
+                    guard let at = calendar.date(
+                        bySettingHour: hour, minute: minute, second: 0, of: dayStart
+                    ) else { continue }
+                    // 计数器只增不减：observe() 的差分才有增量可记（倒退=重新取基线）。
+                    counters[index].prompt += 1_000 + next01() * 60_000
+                    counters[index].completion += 400 + next01() * 12_000
+                    counters[index].cached += 800 + next01() * 40_000
+                    tokens.observe(
+                        nodeID: entry.nodeID, port: entry.port, model: entry.model,
+                        prompt: counters[index].prompt,
+                        completion: counters[index].completion,
+                        cached: counters[index].cached,
+                        at: at
+                    )
+                }
+            }
+        }
+
+        // --- 能耗：31 天 × 5 分钟粒度（≈9k 桶）---
+        //
+        // 曲线：白天重、夜里轻；0–6 点引擎停机（整段无覆盖 → 详情里是缺口时段，
+        // 不是 0 W）；gapDay 整天没开机。240 W 上限与 PowerEstimate 的 cap 一致。
+        let energyGapDay = 9
+        for dayOffset in stride(from: 30, through: 0, by: -1) {
+            if dayOffset == energyGapDay { continue }
+            let dayStart = calendar.startOfDay(for: now.addingTimeInterval(-Double(dayOffset) * 86400))
+            let lastMinute = dayOffset == 0
+                ? calendar.component(.hour, from: now) * 60 + calendar.component(.minute, from: now)
+                : 1440
+            for slot in 0..<288 {
+                let minute = slot * 5
+                if minute >= lastMinute { break }
+                guard let at = calendar.date(byAdding: .minute, value: minute, to: dayStart) else { continue }
+                let hour = calendar.component(.hour, from: at)
+                if hour < 6 { continue }   // 夜里停机：无覆盖，不是「0 W」
+                let weekday = calendar.component(.weekday, from: at)
+                let weekendFactor = (weekday == 1 || weekday == 7) ? 0.72 : 1.0
+                let shape = 0.45 + 0.55 * max(0, sin((Double(hour) - 5) / 24 * 2 * .pi))
+                let watts = min(240, (38 + 118 * shape * (0.75 + 0.5 * next01())) * weekendFactor)
+                let outputTokens = watts > 70 ? next01() * 900 : 0
+                energy.seedBucket(
+                    minuteKey: Int(floor(at.timeIntervalSince1970 / 60)),
+                    wh: watts * 300 / 3_600,   // 300 s 的 Wh = W ÷ 12
+                    coveredMs: 300_000,
+                    outputTokens: outputTokens
+                )
+            }
+        }
+
+        // 契约：seedBucket 之后要 prune 收尾。EnergyLedger 没有公开 prune，而
+        // record() 末尾必调——用一次不写桶的 record 触发它；顺带 pushRecent 让
+        // 24h 图的「当前 W」有一个读数（demo 模式没有真实采样）。
+        energy.record(
+            nodeID: series[0].nodeID, at: now, watts: 84,
+            outputTokens: nil, countEnergy: true, countTokens: false
+        )
+
+        self.tokens = tokens
+        self.energy = energy
     }
 
     // MARK: - Persistence

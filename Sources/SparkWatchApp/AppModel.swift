@@ -56,10 +56,19 @@ final class AppModel: ObservableObject {
     @Published private(set) var hourlyWatts: [Double?] = []
     @Published private(set) var tokenTotals = TokenLedger.Totals(prompt: 0, completion: 0, cached: 0)
     @Published private(set) var tokenRows: [TokenLedger.ModelRow] = []
-    /// Per-day completion tokens (UTC days), oldest first, for the token page's
-    /// chart. Days with no data come back as 0 from the ledger; the page draws those
-    /// as stubs so "no traffic" is not confused with "no measurement".
-    @Published private(set) var tokenDaily: [(day: String, completion: Double)] = []
+    /// 按本地日聚合的 token 分量账（14 天），最旧在前。hasData == false 的那天
+    /// **没有任何记录**——页面把它画成小竖条：「没记录」不能被画成「测得为零」。
+    @Published private(set) var tokenDaily: [TokenLedger.DailyEntry] = []
+    /// 按本地日聚合的能耗（31 天），最旧在前。kwh == nil ⇔ 那天无覆盖。
+    @Published private(set) var energyDaily: [EnergyLedger.DailyEntry] = []
+    /// 「按天」图当前选中的本地日（yyyy-MM-dd）。UI 可写（DailyBars 的 selection
+    /// 经 setTokenDay/setEnergyDay 进来，那里会立即镜像一次详情）。
+    @Published var selectedTokenDay: String?
+    @Published var selectedEnergyDay: String?
+    /// 选中日的详情镜像；未选中时为 nil。选中「今天」时每个刷新 tick 重算，
+    /// 面板跟数据一样是活的。
+    @Published private(set) var tokenDayDetail: TokenDayDetail?
+    @Published private(set) var energyDayDetail: EnergyDayDetail?
     @Published private(set) var events: [WatchEvent] = []
     /// Which window the token pages show. The ledger keeps 35 days, so this is a
     /// view choice rather than a data limit.
@@ -120,6 +129,14 @@ final class AppModel: ObservableObject {
         tasks = DemoData.tasks(for: nodes)
         lastUpdate = Date()
         seedHistory()
+        // demo 机队需要**跨天**的账本，两张按天图与详情面板才有东西可画。
+        // 只在只读实例里铺：预览/CLI 全是 readOnly（save() 直接返回），种子只活
+        // 在内存；可写实例铺了就会随 save() 落盘，污染真实账本文件。
+        if ledgers.isReadOnly {
+            ledgers.seedDemoHistory(now: Date())
+        }
+        // demo 模式 refresh() 直接返回，镜像必须在这里补一次，页面才有数据。
+        mirrorLedgers()
     }
 
     /// CLI/preview only: force a palette without touching stored settings, so
@@ -255,8 +272,32 @@ final class AppModel: ObservableObject {
         hourlyWatts = ledgers.energy.hourlyWatts(hours: 24, now: now)
         tokenTotals = ledgers.tokens.totals(tokenRange, now: now)
         tokenRows = ledgers.tokens.byModel(tokenRange, now: now)
-        tokenDaily = ledgers.tokens.dailyCompletion(days: 14, now: now)
+        // 存储是 UTC 小时/分钟桶，展示口径是本地日：查询侧重分组（DayQueries）。
+        tokenDaily = ledgers.tokens.daily(days: 14, now: now, timeZone: .current)
+        energyDaily = ledgers.energy.daily(days: 31, now: now, timeZone: .current)
+        // 选中日的详情每 tick 重算：「今天」的柱是活数据，详情必须跟着活。
+        // 未选中时置 nil，别让上一次的详情在取消选择后还挂着。
+        tokenDayDetail = selectedTokenDay.flatMap {
+            ledgers.tokens.dayDetail(day: $0, timeZone: .current)
+        }
+        energyDayDetail = selectedEnergyDay.flatMap {
+            ledgers.energy.dayDetail(day: $0, timeZone: .current)
+        }
         events = ledgers.events.recent(limit: 80)
+    }
+
+    /// 选中/取消某天（nil = 取消）。**立即镜像一次**：详情面板要和点击同帧出现，
+    /// 不能等下一个刷新 tick——demo/预览实例根本没有下一个 tick。
+    func setTokenDay(_ day: String?) {
+        guard day != selectedTokenDay else { return }
+        selectedTokenDay = day
+        mirrorLedgers()
+    }
+
+    func setEnergyDay(_ day: String?) {
+        guard day != selectedEnergyDay else { return }
+        selectedEnergyDay = day
+        mirrorLedgers()
     }
 
     func setTokenRange(_ range: TokenLedger.Range) {

@@ -242,19 +242,21 @@ struct DetailView: View {
             Spacer(minLength: 8)
 
             // Scales past a handful of machines: a segmented control would be
-            // unusable at twelve, a popup menu is not.
-            Picker("", selection: Binding(
-                get: { state.focus },
-                set: { state.focus = $0 }
-            )) {
-                Text("全部机器 (\(model.nodes.count))").tag(UUID?.none)
-                ForEach(state.labels, id: \.id) { entry in
-                    Text(entry.name).tag(UUID?.some(entry.id))
-                }
-            }
-            .labelsHidden()
-            .frame(width: 200)
-            .help("⌘1…⌘9 直接切到第 N 台，⌘0 回到全部")
+            // unusable at twelve, a popup menu is not. 系统 Picker（离屏渲染里是
+            // 黄色大色块）换成自绘下拉，语义不变。
+            TerminalDropdown(
+                options: state.labels.map { $0.id },
+                label: { id in state.labels.first(where: { $0.id == id })?.name ?? "" },
+                selection: Binding(
+                    get: { state.focus },
+                    set: { state.focus = $0 }
+                ),
+                placeholder: "全部机器 (\(model.nodes.count))",
+                palette: palette,
+                width: 200,
+                help: "⌘1…⌘9 直接切到第 N 台，⌘0 回到全部",
+                clearLabel: "全部机器 (\(model.nodes.count))"
+            )
 
             Button {
                 Task { await model.refresh() }

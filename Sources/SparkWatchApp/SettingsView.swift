@@ -104,12 +104,18 @@ final class SettingsModel: ObservableObject {
 struct SettingsView: View {
     @ObservedObject var model: SettingsModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
     /// Offscreen rendering (`ImageRenderer`) draws a `ScrollView` as empty, which
     /// made the preview look like a broken page. In preview mode the sections go
     /// into a plain stack instead.
     var previewMode = false
 
     private var enabledCount: Int { model.settings.nodes.filter(\.enabled).count }
+
+    /// 品牌色跟当前主题走：页头图标不再硬编码系统蓝（全 app 只有一个 accent 色相）。
+    private var accent: Color {
+        Palette.of(model.settings.appearance, dark: colorScheme == .dark).accentText
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -147,7 +153,7 @@ struct SettingsView: View {
         HStack(spacing: 10) {
             Image(systemName: "square.stack.3d.up.fill")
                 .font(.system(size: 15))
-                .foregroundStyle(.blue)
+                .foregroundStyle(accent)
             VStack(alignment: .leading, spacing: 1) {
                 Text("SparkWatch 设置")
                     .font(.system(size: 13, weight: .semibold))

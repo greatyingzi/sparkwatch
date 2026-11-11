@@ -26,23 +26,45 @@ struct MachinePanels: View {
     private var inference: InferenceSample? { node.inference }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 14) {
-            VStack(spacing: 14) {
-                gpuPanel
-                unifiedMemoryPanel
-                cpuPanel
-                thermalAndFaultPanel
+        // 两列在空间够时并排；不够时整体改为一列堆叠。900 pt 窗口的实测教训：
+        // 左列（Ring 140 + 96pt 键列 + 值）最小 ~356pt，加上固定 420pt 右列超过
+        // 可用宽度，SwiftUI 会把右列整列推出右缘——同一处溢出还连坐页头
+        // （页面 minWidth 变大，标题行的按钮被裁）并把 GPU 面板里的数值挤成
+        // 零宽。ViewThatFits 让窄窗退化为单列，两个根因一起消掉。
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: 14) {
+                primaryColumn
+                secondaryColumn
+                    .frame(width: 420, alignment: .top)
             }
-            .frame(maxWidth: .infinity, alignment: .top)
+            VStack(alignment: .leading, spacing: 14) {
+                primaryColumn
+                secondaryColumn
+            }
+        }
+    }
 
-            VStack(spacing: 14) {
-                llmPanel
-                storagePanel
-                networkPanel
-                tailnetPanel
-                workloadPanel
-            }
-            .frame(width: 420, alignment: .top)
+    /// 左列：GPU / 统一内存 / CPU / 热与故障。
+    @ViewBuilder
+    private var primaryColumn: some View {
+        VStack(spacing: 14) {
+            gpuPanel
+            unifiedMemoryPanel
+            cpuPanel
+            thermalAndFaultPanel
+        }
+        .frame(maxWidth: .infinity, alignment: .top)
+    }
+
+    /// 右列：LLM 服务 / 存储 / 网络 / Tailnet / 负载与内核事件。
+    @ViewBuilder
+    private var secondaryColumn: some View {
+        VStack(spacing: 14) {
+            llmPanel
+            storagePanel
+            networkPanel
+            tailnetPanel
+            workloadPanel
         }
     }
 

@@ -48,7 +48,9 @@ struct PageHeader: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            Spacer(minLength: 0)
+            // 标题列吃满剩余宽度：meta 行在窄窗里换行，而不是把 trailing
+            //（分段选择器/图例）挤出右缘——900 pt 渲染里 trailing 被裁半的根因。
+            .frame(maxWidth: .infinity, alignment: .leading)
             if let trailing { trailing }
         }
     }
@@ -95,6 +97,204 @@ func compactTokens(_ value: Double) -> String {
     }
 }
 
+// MARK: - 终端风选择控件（Charts.swift spanSelector 同语言）
+//
+// 离屏渲染下系统 Picker / Stepper 会画成黄色大色块加 🚫（审计截图里的既知
+// artifact），而且原生控件与 surfaceElevated / border 发丝的终端语言不符。
+// 这里按 spanSelector 的同款做法自绘：整框描边、段间发丝分隔、激活段淡底。
+// 放在本文件是因为 Controls.swift 不在本飞轮的改动清单里。
+/// `Option` 只要求 Hashable：调用方的枚举（如 TokenLedger.Range）不必为此
+/// 再补一个 Identifiable。
+struct TerminalSegmentPicker<Option: Hashable>: View {
+    var options: [Option]
+    var label: (Option) -> String
+    var selection: Binding<Option>
+    var palette: Palette
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(Array(options.enumerated()), id: \.element) { index, option in
+                if index > 0 {
+                    Rectangle()
+                        .fill(palette.border)
+                        .frame(width: 1, height: 12)
+                }
+                Button {
+                    selection.wrappedValue = option
+                } label: {
+                    Text(label(option))
+                        .font(.system(size: 10, weight: option == selection.wrappedValue ? .semibold : .regular, design: .monospaced))
+                        .foregroundStyle(option == selection.wrappedValue ? palette.textStrong : palette.faint)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background {
+                            if option == selection.wrappedValue {
+                                Rectangle().fill(palette.surfaceHover)
+                            }
+                        }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(palette.border, lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+        .fixedSize()
+    }
+}
+
+/// 自绘下拉。系统 Menu 在离屏渲染里画成黄色色块加 🚫（NSMenu 背板在
+/// ImageRenderer 下不可绘制），原生外观也与终端语言不符；这里连展开列表一起
+/// 自绘：收起 = 发丝框 + chevron；展开 = 选项列表 overlay 浮在下方（不挤压
+/// 布局），选中即收起，再点一次按钮也可收起。Option 用 Hashable，调用方
+/// 可以直接用 UUID?（nil = 「全部」这类伪选项）。
+struct TerminalDropdown<Option: Hashable>: View {
+    var options: [Option]
+    var label: (Option) -> String
+    var selection: Binding<Option?>
+    var placeholder: String
+    var palette: Palette
+    var width: CGFloat? = nil
+    var help: String? = nil
+    /// 有值时列表首行是「清除选择」：把 selection 置回 nil（如详情窗的「全部机器」）。
+    var clearLabel: String? = nil
+
+    @State private var open = false
+
+    private var currentLabel: String {
+        if let value = selection.wrappedValue, options.contains(value) { return label(value) }
+        return placeholder
+    }
+
+    var body: some View {
+        Button {
+            open.toggle()
+        } label: {
+            HStack(spacing: 6) {
+                Text(currentLabel)
+                    .font(.system(size: 11.5, design: .monospaced))
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .rotationEffect(.degrees(open ? 180 : 0))
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .background(RoundedRectangle(cornerRadius: 5, style: .continuous).fill(palette.surfaceElevated))
+            .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(palette.border, lineWidth: 1))
+            .frame(width: width, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .overlay(alignment: .topLeading) {
+            if open {
+                VStack(alignment: .leading, spacing: 0) {
+                    if let clearLabel {
+                        Button {
+                            selection.wrappedValue = nil
+                            open = false
+                        } label: {
+                            HStack(spacing: 6) {
+                                Text(clearLabel)
+                                    .font(.system(size: 11.5, design: .monospaced))
+                                    .foregroundStyle(selection.wrappedValue == nil ? palette.accentText : palette.text)
+                                    .lineLimit(1)
+                                Spacer(minLength: 0)
+                                if selection.wrappedValue == nil {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 8, weight: .semibold))
+                                        .foregroundStyle(palette.accentText)
+                                }
+                            }
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 6)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        Rectangle().fill(palette.border).frame(height: 1)
+                    }
+                    ForEach(Array(options.enumerated()), id: \.element) { index, option in
+                        if index > 0 { Rectangle().fill(palette.border).frame(height: 1) }
+                        Button {
+                            selection.wrappedValue = option
+                            open = false
+                        } label: {
+                            HStack(spacing: 6) {
+                                Text(label(option))
+                                    .font(.system(size: 11.5, design: .monospaced))
+                                    .foregroundStyle(option == selection.wrappedValue ? palette.accentText : palette.text)
+                                    .lineLimit(1)
+                                Spacer(minLength: 0)
+                                if option == selection.wrappedValue {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 8, weight: .semibold))
+                                        .foregroundStyle(palette.accentText)
+                                }
+                            }
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 6)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .frame(width: width)
+                .background(RoundedRectangle(cornerRadius: 5, style: .continuous).fill(palette.surfaceElevated))
+                .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(palette.borderStrong, lineWidth: 1))
+                .shadow(color: Color.black.opacity(palette.isDark ? 0.45 : 0.12), radius: 8, y: 3)
+                .offset(y: 26)
+                .transition(.opacity)
+            }
+        }
+        .zIndex(100)
+        .help(help ?? "")
+    }
+}
+
+/// 终端步进器：−/＋ 与数值同处一个发丝框，替代系统 Stepper（黄块 artifact）。
+/// step 与范围由调用方给（基准页是 64 一档、64…2048）。
+struct TerminalStepper: View {
+    var value: Int
+    var step: Int
+    var range: ClosedRange<Int>
+    var onChange: (Int) -> Void
+    var palette: Palette
+
+    var body: some View {
+        HStack(spacing: 0) {
+            stepButton("−", enabled: value > range.lowerBound) {
+                onChange(max(range.lowerBound, value - step))
+            }
+            Rectangle().fill(palette.border).frame(width: 1, height: 14)
+            Text("\(value)")
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .monospacedDigit()
+                .foregroundStyle(palette.textStrong)
+                .frame(minWidth: 44)
+                .padding(.horizontal, 6)
+            Rectangle().fill(palette.border).frame(width: 1, height: 14)
+            stepButton("+", enabled: value < range.upperBound) {
+                onChange(min(range.upperBound, value + step))
+            }
+        }
+        .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(palette.border, lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+        .fixedSize()
+    }
+
+    private func stepButton(_ glyph: String, enabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(glyph)
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .foregroundStyle(enabled ? palette.mutedStrong : palette.faint)
+                .frame(width: 24, height: 22)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+    }
+}
+
 // MARK: - Energy
 
 struct EnergyPage: View {
@@ -134,16 +334,9 @@ struct EnergyPage: View {
                         }
                     }
                     histogram
-                    if model.hourlyWatts.count > 1 {
-                        HStack {
-                            Text("24 小时前").font(.system(size: 10.5, design: .monospaced))
-                            Spacer()
-                            Text("12 小时").font(.system(size: 10.5, design: .monospaced))
-                            Spacer()
-                            Text("现在").font(.system(size: 10.5, design: .monospaced))
-                        }
-                        .foregroundStyle(.tertiary)
-                    }
+                    // 轴标签只有一行：DailyBars 自带 first/mid/last（「23 小时前 ·
+                    // 11 小时前 · 现在」）。这里不再手写第二行——两行几乎相同的轴
+                    // 读起来像渲染错误。
                 }
             }
 
@@ -156,7 +349,7 @@ struct EnergyPage: View {
                 )
                 statPanel(
                     "效率",
-                    snapshot?.whPerOutputToken.map { String(format: "%.2f", $0 * 1000) } ?? "--",
+                    snapshot?.whPerOutputToken.map { String(format: "%.2f Wh", $0 * 1000) } ?? "--",
                     foot: "每 1000 生成 token 的 Wh（按有覆盖的窗口算）"
                 )
                 statPanel(
@@ -419,18 +612,19 @@ struct TokenPage: View {
         .fixedSize()
     }
 
+    /// 区间选择：spanSelector 同语言的终端分段框（系统分段 Picker 在离屏渲染下
+    /// 是黄色大色块，且与页面其余控件的语言不符）。占位仍是页头 trailing 槽，
+    /// 布局不动。
     private var rangePicker: some View {
-        Picker("", selection: Binding(
-            get: { model.tokenRange },
-            set: { model.setTokenRange($0) }
-        )) {
-            ForEach(TokenLedger.Range.allCases, id: \.self) { range in
-                Text(range.label).tag(range)
-            }
-        }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .frame(width: 380)
+        TerminalSegmentPicker(
+            options: TokenLedger.Range.allCases,
+            label: { $0.label },
+            selection: Binding(
+                get: { model.tokenRange },
+                set: { model.setTokenRange($0) }
+            ),
+            palette: palette
+        )
     }
 
 }
@@ -452,8 +646,10 @@ struct ActivityPage: View {
         VStack(alignment: .leading, spacing: 16) {
             PageHeader(
                 title: "活动",
-                meta: ["只记状态变化", "去重窗口 5 秒", "最多 2000 条"],
-                palette: palette
+                meta: ["只记状态变化", "去重窗口 5 秒", "共 \(model.events.count) 条 · 上限 2000"],
+                palette: palette,
+                // 色点没有图例就只是装饰：四个严重级各是什么颜色，写在这里。
+                trailing: AnyView(severityLegend)
             )
             Panel(palette: palette) {
                 if model.events.isEmpty {
@@ -462,7 +658,12 @@ struct ActivityPage: View {
                         .foregroundStyle(.secondary)
                 } else {
                     VStack(spacing: 0) {
-                        ForEach(model.events) { event in
+                        ForEach(Array(model.events.enumerated()), id: \.element.id) { index, event in
+                            // 跨日分隔：时间列只有 HH:mm:ss，一个月的事件不标日期
+                            // 就答不了「这是哪天的 11:30」。
+                            if startsNewDay(at: index) {
+                                daySeparator(event.at)
+                            }
                             HStack(alignment: .firstTextBaseline, spacing: 10) {
                                 Text(event.at.formatted(date: .omitted, time: .standard))
                                     .font(.system(size: 11, design: .monospaced))
@@ -481,7 +682,9 @@ struct ActivityPage: View {
                                     .foregroundStyle(.tertiary)
                             }
                             .padding(.vertical, 6)
-                            .overlay(alignment: .top) { if event.id != model.events.first?.id { Divider() } }
+                            .overlay(alignment: .top) {
+                                if index > 0, !startsNewDay(at: index) { Divider() }
+                            }
                         }
                     }
                 }
@@ -496,6 +699,48 @@ struct ActivityPage: View {
         case .warn: palette.warn
         case .error: palette.danger
         }
+    }
+
+    private var severityLegend: some View {
+        HStack(spacing: 10) {
+            legendItem(palette.info, "信息")
+            legendItem(palette.ok, "成功")
+            legendItem(palette.warn, "注意")
+            legendItem(palette.danger, "异常")
+        }
+        .fixedSize()
+    }
+
+    private func legendItem(_ color: Color, _ label: String) -> some View {
+        HStack(spacing: 4) {
+            Circle().fill(color).frame(width: 6, height: 6)
+            Text(label)
+                .font(.system(size: 10.5, design: .rounded))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    /// 第 index 条事件是否是新的一天第一行（列表按时间倒序，比较前一条即可）。
+    private func startsNewDay(at index: Int) -> Bool {
+        guard model.events.indices.contains(index) else { return false }
+        if index == 0 { return true }
+        let event = model.events[index]
+        let previous = model.events[index - 1]
+        return !Calendar.current.isDate(event.at, inSameDayAs: previous.at)
+    }
+
+    private func daySeparator(_ at: Date) -> some View {
+        HStack(spacing: 8) {
+            Text(at.formatted(.dateTime.year().month().day()))
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(palette.faint)
+            Rectangle()
+                .fill(palette.border)
+                .frame(height: 1)
+        }
+        .padding(.top, 10)
+        .padding(.bottom, 4)
+        .padding(.horizontal, 2)
     }
 }
 
@@ -533,22 +778,34 @@ struct BenchmarkPage: View {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(spacing: 10) {
                         Text("目标").font(.system(size: 12.5, design: .rounded)).foregroundStyle(.secondary)
-                        Picker("", selection: Binding(
-                            get: { selectedNode ?? model.nodes.first?.id },
-                            set: { selectedNode = $0 }
-                        )) {
-                            ForEach(model.nodes) { node in
-                                Text("\(node.name)\(endpointSuffix(node))").tag(Optional(node.id))
-                            }
-                        }
-                        .labelsHidden()
-                        .frame(width: 300)
+                        // 系统下拉（离屏渲染里是黄色大色块）换成自绘下拉：
+                        // 语义不变（机器可能很多，下拉比分段框可用）。
+                        TerminalDropdown(
+                            options: model.nodes.map { $0.id },
+                            label: { id in
+                                model.nodes.first(where: { $0.id == id }).map {
+                                    "\($0.name)\(endpointSuffix($0))"
+                                } ?? ""
+                            },
+                            selection: Binding(
+                                get: { selectedNode ?? model.nodes.first?.id },
+                                set: { selectedNode = $0 }
+                            ),
+                            placeholder: model.nodes.isEmpty ? "没有可用目标" : "选择目标",
+                            palette: palette,
+                            width: 300,
+                            help: "选择要测的机器与端点"
+                        )
+                        .disabled(model.nodes.isEmpty)
 
                         Text("最大 token").font(.system(size: 12.5, design: .rounded)).foregroundStyle(.secondary)
-                        Stepper(value: $maxTokens, in: 64...2048, step: 64) {
-                            Text("\(maxTokens)").font(.system(size: 12.5, design: .monospaced))
-                        }
-                        .frame(width: 130)
+                        TerminalStepper(
+                            value: maxTokens,
+                            step: 64,
+                            range: 64...2048,
+                            onChange: { maxTokens = $0 },
+                            palette: palette
+                        )
                         Spacer(minLength: 0)
                     }
 
@@ -563,7 +820,12 @@ struct BenchmarkPage: View {
                                     .padding(.horizontal, 8)
                                     .padding(.vertical, 3)
                                     .background(
-                                        Capsule().fill(levels.contains(level) ? palette.accentSoft : palette.surfaceHover)
+                                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                            .fill(levels.contains(level) ? palette.accentSoft : palette.surfaceHover)
+                                    )
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                            .strokeBorder(palette.border, lineWidth: 1)
                                     )
                                     .foregroundStyle(levels.contains(level) ? palette.accentText : palette.mutedStrong)
                             }
@@ -594,7 +856,17 @@ struct BenchmarkPage: View {
                 }
             }
 
-            if !waves.isEmpty { results }
+            if !waves.isEmpty {
+                results
+            } else {
+                // 空态要说明会发生什么，而不是留一块空白让人猜按钮坏了。
+                Panel(palette: palette) {
+                    Text("还没有结果。选目标、勾并发档，点「开始测试」——每档并发跑一行，跑完即可对比单流均值与合计吞吐；结果只存在本页，切走即清空。")
+                        .font(.system(size: 12, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
         }
         .onDisappear { tunnel?.stop(); tunnel = nil; tunnelPort = nil }
     }

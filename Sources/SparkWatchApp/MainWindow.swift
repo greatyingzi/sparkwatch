@@ -305,7 +305,7 @@ struct Sidebar: View {
     /// characters. A machine that is down says so; a busy one shows its rate.
     private func subLabel(_ node: NodeSnapshot) -> String {
         if node.connecting { return "连接中" }
-        if node.source == .down { return "off" }
+        if node.source == .down { return "离线" }
         if let running = node.inference?.running, running == 0 { return "—" }
         if let tps = node.inference?.decodeTPS, tps > 0.5 {
             return tps >= 100 ? String(format: "%.0f/s", tps) : String(format: "%.1f/s", tps)
@@ -475,46 +475,62 @@ struct OverviewPage: View {
     }
 
     private var header: some View {
-        HStack(alignment: .top, spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
+        // 标题行放操作按钮，meta 行独占全宽。旧结构里 meta 与按钮共用一行：
+        // 段落各自是独立 Text（不换行），一行 meta 的理想宽度 + 按钮超过可用
+        // 宽度时整行溢出，900 pt 窗口下按钮被推出右缘裁掉。
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
                 Text("概览")
                     .font(.system(size: 28, weight: .semibold, design: .rounded))
                     .tracking(-0.5)
+                Spacer(minLength: 0)
                 HStack(spacing: 8) {
-                    Text("\(model.nodes.count) 台机器")
-                    Circle().fill(alive == model.nodes.count ? palette.ok : palette.warn).frame(width: 6, height: 6)
-                    Text("\(alive)/\(model.nodes.count) 在线")
-                    if memory.total > 0 {
-                        Text("·")
-                        Text(String(format: "统一内存 %.0f / %.0f GB",
-                                    memory.used / 1_073_741_824, memory.total / 1_073_741_824))
+                    if model.isPaused {
+                        Button("恢复监控") { Task { await model.togglePause() } }
+                            .controlSize(.small)
+                    } else {
+                        Button("暂停监控") { Task { await model.togglePause() } }
+                            .controlSize(.small)
                     }
-                    if let task = model.tasks.first {
-                        Text("·")
-                        Text("\(task.model) · \(task.topologyLabel)")
-                            .lineLimit(1)
-                    }
+                    Button("设置…") { onOpenSettings() }
+                        .controlSize(.small)
                 }
-                .font(.system(size: 12.5, design: .rounded))
-                .foregroundStyle(.secondary)
             }
-            Spacer(minLength: 0)
             HStack(spacing: 8) {
-                if model.isPaused {
-                    Button("恢复监控") { Task { await model.togglePause() } }
-                        .controlSize(.small)
-                } else {
-                    Button("暂停监控") { Task { await model.togglePause() } }
-                        .controlSize(.small)
+                Text("\(model.nodes.count) 台机器")
+                Circle().fill(alive == model.nodes.count ? palette.ok : palette.warn).frame(width: 6, height: 6)
+                Text("\(alive)/\(model.nodes.count) 在线")
+                if memory.total > 0 {
+                    Text("·")
+                    Text(String(format: "统一内存 %.0f / %.0f GB",
+                                memory.used / 1_073_741_824, memory.total / 1_073_741_824))
                 }
-                Button("设置…") { onOpenSettings() }
-                    .controlSize(.small)
+                if let task = model.tasks.first {
+                    Text("·")
+                    Text("\(task.model) · \(task.topologyLabel)")
+                        .lineLimit(1)
+                }
             }
+            .font(.system(size: 12.5, design: .rounded))
+            .foregroundStyle(.secondary)
         }
     }
 
     private var kpis: some View {
-        HStack(alignment: .top, spacing: 14) {
+        // 等宽又等高的网格：HStack(alignment: .top) 里带 sparkline 的瓦片比
+        // 不带的矮 30pt，四个瓦片底边参差；LazyVGrid 行内取最大高度，底边取齐。
+        LazyVGrid(
+            columns: [
+                // alignment .top：GridItem 默认 .center 会把矮瓦片在行内垂直居中，
+                // 四个瓦片上下都留缝、看着像悬浮；内容一律顶对齐。
+                GridItem(.flexible(), spacing: 14, alignment: .top),
+                GridItem(.flexible(), spacing: 14, alignment: .top),
+                GridItem(.flexible(), spacing: 14, alignment: .top),
+                GridItem(.flexible(), spacing: 14, alignment: .top),
+            ],
+            alignment: .leading,
+            spacing: 14
+        ) {
             kpiTile(
                 label: "机队解码",
                 value: fleetDecode > 0 ? String(format: "%.1f", fleetDecode) : "--",

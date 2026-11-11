@@ -35,8 +35,8 @@ jobs:
       - name: Build and test
         run: |
           set -o pipefail
-          swift build 2>swift build 2>&1 | tail -51 | tail -40
-          swift test 2>swift test 2>&1 | tail -51 | tail -40
+          swift build 2>&1 | tail -40
+          swift test 2>&1 | tail -40
 
       - name: Package (not published)
         run: |

@@ -560,7 +560,7 @@ if CommandLine.arguments.contains("--print-status") {
     }
     application.setActivationPolicy(.accessory)
     Task { @MainActor in
-        let model = AppModel(collector: ClusterCollector(), readOnlyLedgers: true)
+        let model = AppModel(collector: ClusterCollector(), readOnlyLedgers: true, ledgerDirectory: previewDataDir())
         if let demoCount {
             model.useDemoData(nodeCount: demoCount)
         } else {
@@ -719,7 +719,7 @@ if CommandLine.arguments.contains("--print-chart") {
     } ?? 1800
     application.setActivationPolicy(.accessory)
     Task { @MainActor in
-        let model = AppModel(collector: ClusterCollector(), readOnlyLedgers: true)
+        let model = AppModel(collector: ClusterCollector(), readOnlyLedgers: true, ledgerDirectory: previewDataDir())
         await model.start()
         var elapsed = 0.0
         while elapsed < seconds {
@@ -835,7 +835,7 @@ if let index = CommandLine.arguments.firstIndex(of: "--preview-settings"),
     let path = CommandLine.arguments[index + 1]
     application.setActivationPolicy(.accessory)
     Task { @MainActor in
-        let model = AppModel(collector: ClusterCollector(), readOnlyLedgers: true)
+        let model = AppModel(collector: ClusterCollector(), readOnlyLedgers: true, ledgerDirectory: previewDataDir())
         await model.start()
         for _ in 0..<20 {
             await model.refresh()
@@ -898,6 +898,16 @@ if let index = CommandLine.arguments.firstIndex(of: "--preview-settings"),
     exit(0)
 }
 
+// --data-dir <dir>：账本回放。把真机账本目录喂给预览/诊断实例（只读），
+// 机器页/舰队页渲染**真实历史形状**（真实占空比、真实断口），而非合成种子。
+// 配 --demo-devices 时 demo 节点 id 重映射为账本里的真实节点；绝不写回（readOnly 门）。
+func previewDataDir() -> URL? {
+    guard let index = CommandLine.arguments.firstIndex(of: "--data-dir"),
+        index + 1 < CommandLine.arguments.count
+    else { return nil }
+    return URL(fileURLWithPath: CommandLine.arguments[index + 1], isDirectory: true)
+}
+
 // Offscreen render of the main window (sidebar + a page), for the same reason as
 // --preview: an agent without a vision tool still has to be able to check a layout,
 // and a window that is only ever looked at by eye is a window nobody checked.
@@ -924,7 +934,7 @@ if let index = CommandLine.arguments.firstIndex(of: "--preview-main"),
     }
     application.setActivationPolicy(.accessory)
     Task { @MainActor in
-        let model = AppModel(collector: ClusterCollector(), readOnlyLedgers: true)
+        let model = AppModel(collector: ClusterCollector(), readOnlyLedgers: true, ledgerDirectory: previewDataDir())
         // `--seconds N` forces a real collection window: the ledgers integrate over
         // time (energy is minutes, history is sampled per tick), so a render that
         // returns as soon as one sample lands can only ever show zeros.
@@ -1017,7 +1027,7 @@ if let index = CommandLine.arguments.firstIndex(of: "--preview-detail"),
         position + 1 < CommandLine.arguments.count ? Double(CommandLine.arguments[position + 1]) : nil
     } ?? 1020
     Task { @MainActor in
-        let model = AppModel(collector: ClusterCollector(), readOnlyLedgers: true)
+        let model = AppModel(collector: ClusterCollector(), readOnlyLedgers: true, ledgerDirectory: previewDataDir())
         if let demoCount {
             model.useDemoData(nodeCount: demoCount)
         } else {
@@ -1078,7 +1088,7 @@ if let index = CommandLine.arguments.firstIndex(of: "--preview"),
     application.setActivationPolicy(.accessory)
     Task { @MainActor in
         let startedAt = Date()
-        let model = AppModel(collector: ClusterCollector(), readOnlyLedgers: true)
+        let model = AppModel(collector: ClusterCollector(), readOnlyLedgers: true, ledgerDirectory: previewDataDir())
         if let demoCount {
             // Synthetic fleet: renders N machines (any N) without needing them.
             model.useDemoData(nodeCount: demoCount)

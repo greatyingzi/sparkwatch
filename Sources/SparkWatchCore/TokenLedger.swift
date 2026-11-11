@@ -87,6 +87,9 @@ public struct TokenLedger: Sendable, Codable {
     // internal：按天查询（DayQueries.swift）单遍扫桶需要读它；public 契约不变。
     var series: [SeriesKey: SeriesState] = [:]
 
+    /// 回放/诊断：出现过 series 的节点 id（升序去重）。见 GpuHistory.nodeIDs 注释。
+    public var nodeIDs: [UUID] { Set(series.keys.map { $0.nodeID }).sorted() }
+
     public init(retentionDays: Int = 35, maxSeries: Int = 200, maxModelsPerSeries: Int = 100) {
         self.retentionDays = retentionDays
         self.maxSeries = maxSeries

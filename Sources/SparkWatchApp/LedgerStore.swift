@@ -34,7 +34,7 @@ final class LedgerStore {
     private var lastSave = Date.distantPast
     private let saveInterval: TimeInterval = 30
 
-    private let directory: URL = SettingsStore.directory
+    private let directory: URL
 
     private var historyURL: URL { directory.appendingPathComponent("gpu-history.json") }
     private var energyURL: URL { directory.appendingPathComponent("energy.json") }
@@ -54,8 +54,18 @@ final class LedgerStore {
     /// 是 no-op，种子只活在内存；可写实例会把种子随 save() 写进真实账本文件。
     var isReadOnly: Bool { readOnly }
 
-    init(readOnly: Bool = false) {
+    /// 回放/诊断：账本里出现过的全部节点 id（并集升序）。
+    /// --data-dir 预览用它把 demo 节点重映射到真实 id，机器页才取得到历史。
+    func knownNodeIDs() -> [UUID] {
+        var ids = Set(history.nodeIDs)
+        ids.formUnion(energy.nodeIDs)
+        ids.formUnion(tokens.nodeIDs)
+        return ids.sorted()
+    }
+
+    init(readOnly: Bool = false, directory: URL? = nil) {
         self.readOnly = readOnly
+        self.directory = directory ?? SettingsStore.directory
         load()
     }
 

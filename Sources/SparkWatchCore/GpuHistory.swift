@@ -57,6 +57,10 @@ public struct GpuHistory: Sendable, Codable {
         return Int((maxAge / minGap * 1.2).rounded(.up))
     }
 
+    /// 回放/诊断：出现过采样的节点 id（升序）。--data-dir 预览用它把 demo
+    /// 节点重映射到真实 id，机器详情页才按 nodeID 取得到历史。
+    public var nodeIDs: [UUID] { byNode.keys.sorted() }
+
     public mutating func record(_ point: Point, nodeID: UUID) {
         var list = byNode[nodeID] ?? []
 

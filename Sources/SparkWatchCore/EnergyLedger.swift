@@ -76,6 +76,9 @@ public struct EnergyLedger: Sendable, Codable {
     private var nodes: [UUID: NodeState] = [:]
     private var recent: [RecentSample] = []
 
+    /// 回放/诊断：记过电的节点 id（升序）。见 GpuHistory.nodeIDs 注释。
+    public var nodeIDs: [UUID] { nodes.keys.sorted() }
+
     /// 31 天 × 1440 = 44640 个分钟桶，再留一天余量防边界抖动。
     private static let maxBuckets = 46_080
     /// `currentWatts` 的均值窗口。

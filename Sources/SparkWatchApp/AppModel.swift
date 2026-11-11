@@ -52,6 +52,9 @@ final class AppModel: ObservableObject {
     /// had collected and save that back — which is how the real machine's persisted
     /// history ended up looking threadbare.
     let ledgers: LedgerStore
+    /// --data-dir 回放：非 nil 时账本从该目录加载，demo 播种跳过（别盖掉真数据），
+    /// 且 demo 节点 id 重映射为账本里出现过的真实节点 id。
+    let ledgerDirectory: URL?
     @Published private(set) var energySnapshot: EnergyLedger.Snapshot?
     @Published private(set) var hourlyWatts: [Double?] = []
     @Published private(set) var tokenTotals = TokenLedger.Totals(prompt: 0, completion: 0, cached: 0)
@@ -82,9 +85,10 @@ final class AppModel: ObservableObject {
 
     /// `readOnlyLedgers: true` keeps a preview/CLI run from writing the ledgers on disk
     /// (it still reads them) — see the note on `ledgers`.
-    init(collector: ClusterCollector, readOnlyLedgers: Bool = false) {
+    init(collector: ClusterCollector, readOnlyLedgers: Bool = false, ledgerDirectory: URL? = nil) {
         self.collector = collector
-        self.ledgers = LedgerStore(readOnly: readOnlyLedgers)
+        self.ledgers = LedgerStore(readOnly: readOnlyLedgers, directory: ledgerDirectory)
+        self.ledgerDirectory = ledgerDirectory
     }
 
     func start() async {
@@ -126,13 +130,27 @@ final class AppModel: ObservableObject {
     func useDemoData(nodeCount: Int) {
         demoNodes = DemoData.snapshots(count: nodeCount)
         nodes = demoNodes ?? []
+        // --data-dir 回放：把 demo 节点 id 换成账本里真实出现过的节点 id，
+        // 否则机器详情页按 nodeID 取历史会对不上号（舰队级页面不受影响）。
+        if ledgerDirectory != nil, !nodes.isEmpty {
+            let fixtureIDs = ledgers.knownNodeIDs()
+            if !fixtureIDs.isEmpty {
+                nodes = nodes.enumerated().map { index, node in
+                    var remapped = node
+                    remapped.id = fixtureIDs[index % fixtureIDs.count]
+                    return remapped
+                }
+                demoNodes = nodes
+            }
+        }
         tasks = DemoData.tasks(for: nodes)
         lastUpdate = Date()
         seedHistory()
         // demo 机队需要**跨天**的账本，两张按天图与详情面板才有东西可画。
         // 只在只读实例里铺：预览/CLI 全是 readOnly（save() 直接返回），种子只活
         // 在内存；可写实例铺了就会随 save() 落盘，污染真实账本文件。
-        if ledgers.isReadOnly {
+        // --data-dir 回放时跳过：真数据已经在账本里，别用合成种子盖掉。
+        if ledgers.isReadOnly && ledgerDirectory == nil {
             ledgers.seedDemoHistory(now: Date())
         }
         // demo 模式 refresh() 直接返回，镜像必须在这里补一次，页面才有数据。

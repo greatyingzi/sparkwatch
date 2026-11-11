@@ -33,9 +33,9 @@ struct TaskBanner: View {
         case .decoding: palette.ok
         // Last known, not now: grey says "this happened a moment ago" without
         // pretending it is live.
-        case .decodingStale: .secondary
+        case .decodingStale: palette.muted
         case .prefilling: palette.info
-        case .busy: .secondary
+        case .busy: palette.muted
         }
     }
 
@@ -53,21 +53,21 @@ struct TaskBanner: View {
                 Image(systemName: task.isParallel ? "square.stack.3d.up.fill" : "square.stack.3d.up")
                     .font(.system(size: 10))
                     .foregroundStyle(
-                        task.isParallel ? AnyShapeStyle(palette.info) : AnyShapeStyle(.secondary)
+                        task.isParallel ? AnyShapeStyle(palette.info) : AnyShapeStyle(palette.muted)
                     )
                 Text(task.model)
                     .font(.system(size: 11.5, weight: .semibold, design: .rounded))
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .help(task.model)
-                Chip(text: task.topologyLabel, tint: task.isParallel ? palette.info : .secondary)
+                Chip(text: task.topologyLabel, tint: task.isParallel ? palette.info : palette.muted)
                 if let drafter = task.drafter { Chip(text: drafter, tint: palette.violet) }
                 if let quant = task.quantization { Chip(text: quant.uppercased(), tint: palette.violet) }
                 if let ctx = task.contextLength {
                     // Just the number: "ctx" costs 25 pt on a 400 pt row, and that
                     // is 25 pt the model name needs (it was truncating to
                     // "GLM-5.3-F…h-tr3-4bpw"). The tooltip spells it out.
-                    Chip(text: ctx >= 1024 ? "\(ctx / 1024)K" : "\(ctx)", tint: .secondary)
+                    Chip(text: ctx >= 1024 ? "\(ctx / 1024)K" : "\(ctx)", tint: palette.mutedStrong)
                         .help("上下文窗口 \(ctx) tokens")
                 }
                 Spacer(minLength: 0)
@@ -82,11 +82,11 @@ struct TaskBanner: View {
                             .font(.system(size: 9.5, weight: .bold, design: .rounded))
                         Text(task.roleLabel(for: node))
                             .font(.system(size: 9, design: .rounded))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(palette.muted)
                     }
                     .padding(.horizontal, 5)
                     .padding(.vertical, 1.5)
-                    .background(Capsule().fill(Color.primary.opacity(0.06)))
+                    .background(Capsule().fill(palette.text.opacity(0.06)))
                 }
                 Spacer(minLength: 4)
                 if let activity {
@@ -103,7 +103,7 @@ struct TaskBanner: View {
                     Text(String(format: "≈%.0fW", powerW))
                         .font(.system(size: 10.5, design: .rounded))
                         .monospacedDigit()
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(palette.muted)
                         .lineLimit(1)
                         .help("整机功耗是按 GPU 轨拟合的估算值（两个墙上功率计锚点解出），不是实测")
                 }
@@ -119,6 +119,28 @@ struct TaskBanner: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(palette.accent.opacity(0.28), lineWidth: 0.5)
         )
+    }
+}
+
+/// 自绘「进行中」指示：三枚点轮询高亮。系统 ProgressView 在离屏渲染下是黄块加
+/// 禁止符（与 Picker/分段控件同病，设置窗预览整屏同款）；TimelineView 在真机上
+/// 会动、在 ImageRenderer 里落一帧确定的静态点——预览与真机同一张脸。
+struct PulseDots: View {
+    var tint: Color
+    var size: CGFloat = 3.5
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 0.45)) { context in
+            let phase = Int(context.date.timeIntervalSinceReferenceDate * 100) % 3
+            HStack(spacing: 3) {
+                ForEach(0..<3, id: \.self) { index in
+                    Circle()
+                        .fill(tint)
+                        .frame(width: size, height: size)
+                        .opacity(index == phase ? 1 : 0.35)
+                }
+            }
+        }
     }
 }
 
@@ -212,15 +234,16 @@ struct NodeCard: View {
             StatusDot(level: snapshot.health.level, palette: palette)
             Text(snapshot.name)
                 .font(.system(size: 13, weight: .semibold, design: .rounded))
+                .foregroundStyle(palette.textStrong)
             // While the first sample is pending the chip must not claim the node
             // is down: "down" and "still connecting" are different states.
             if snapshot.connecting {
-                Chip(text: "连接中", tint: .blue)
+                Chip(text: "连接中", tint: palette.info)
             } else {
                 Chip(
                     text: snapshot.source.label,
-                    tint: snapshot.source == .dashboard ? .blue
-                        : (snapshot.source == .sshFallback ? .orange : .red)
+                    tint: snapshot.source == .dashboard ? palette.info
+                        : (snapshot.source == .sshFallback ? palette.warn : palette.danger)
                 )
                 if snapshot.source != .down, snapshot.health.level != .ok {
                     Chip(text: Theme.levelLabel(snapshot.health.level),
@@ -232,9 +255,9 @@ struct NodeCard: View {
                 // A rank of a distributed task serves the task's model without
                 // owning an endpoint; calling that "无推理端点" was misleading.
                 if snapshot.inference?.taskRole != nil {
-                    Chip(text: "集群 worker", tint: .teal)
+                    Chip(text: "集群 worker", tint: palette.memEngine)
                 } else if !snapshot.inferenceConfigured, inferenceSource == .auto {
-                    Chip(text: "无推理端点", tint: .secondary)
+                    Chip(text: "无推理端点", tint: palette.muted)
                 }
                 if snapshot.awaitingCredentials {
                     Chip(text: "需登录", tint: palette.warn)
@@ -266,8 +289,8 @@ struct NodeCard: View {
     }
     private var connectingBody: some View {
         HStack(spacing: 10) {
-            ProgressView()
-                .controlSize(.small)
+            // 自绘脉冲点：系统 ProgressView 离屏渲染是黄块加禁止符。
+            PulseDots(tint: palette.mutedStrong)
             VStack(alignment: .leading, spacing: 2) {
                 Text("正在连接…")
                     .font(.system(size: 11.5, design: .rounded))
@@ -297,9 +320,19 @@ struct NodeCard: View {
                     .foregroundStyle(.tertiary)
             }
             Spacer()
-            Button("登录") { onLogin() }
-                .controlSize(.small)
+            plainButton("登录", tint: palette.accentText, action: onLogin)
         }
+    }
+
+    /// 与头部/操作按钮同一语言的文本按钮（见 CompactCard.plainButton 的注释：
+    /// 系统 Button 离屏画成暗灰块，OLED 下完全隐身）。
+    private func plainButton(_ title: String, tint: Color, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                .foregroundStyle(tint)
+        }
+        .buttonStyle(.plain)
     }
 
     private var kpiStrip: some View {
@@ -548,7 +581,7 @@ struct NodeCard: View {
                     .font(.system(size: 10.5, design: .rounded))
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 4)
-                sourceMenu
+                SourceMenu(snapshot: snapshot, source: inferenceSource, onChoose: onChooseSource, palette: palette)
             }
         } else if let inference = snapshot.inference {
             VStack(alignment: .leading, spacing: 4) {
@@ -561,25 +594,25 @@ struct NodeCard: View {
                     // unloads after idle); say so instead of printing "?".
                     Text(inference.model ?? "无模型加载")
                         .font(.system(size: 11.5, weight: .medium, design: .rounded))
-                        .foregroundStyle(inference.model == nil ? .secondary : .primary)
+                        .foregroundStyle(inference.model == nil ? AnyShapeStyle(palette.muted) : AnyShapeStyle(palette.text))
                         .lineLimit(1)
                         .truncationMode(.middle)
                     // A rank of a distributed task reports its role, not a
                     // stale local engine: rank 1's Ollama has nothing to do
                     // with what this box is serving.
                     if let role = inference.taskRole {
-                        Chip(text: role, tint: .teal)
+                        Chip(text: role, tint: palette.memEngine)
                     } else if let engine = inference.engine {
-                        Chip(text: engine, tint: .purple)
+                        Chip(text: engine, tint: palette.violet)
                     }
                     // Model facts, when the engine exposes them.
-                    if let quant = inference.quantization { Chip(text: quant, tint: .indigo) }
+                    if let quant = inference.quantization { Chip(text: quant, tint: palette.violet) }
                     if let ctx = inference.contextLength {
-                        Chip(text: ctx >= 1024 ? "\(ctx / 1024)K ctx" : "\(ctx) ctx", tint: .gray)
+                        Chip(text: ctx >= 1024 ? "\(ctx / 1024)K ctx" : "\(ctx) ctx", tint: palette.muted)
                     }
                     Spacer(minLength: 4)
                     speedBadge(inference)
-                    sourceMenu
+                    SourceMenu(snapshot: snapshot, source: inferenceSource, onChoose: onChooseSource, palette: palette)
                 }
                 if let note = snapshot.inferenceNote {
                     HStack(spacing: 5) {
@@ -605,10 +638,10 @@ struct NodeCard: View {
                         Image(systemName: "square.stack.3d.up.fill")
                             .font(.system(size: 9))
                             .symbolRenderingMode(.monochrome)
-                            .foregroundStyle(.teal)
+                            .foregroundStyle(palette.memEngine)
                         Text("本机是集群 rank：无自有端点，速率与请求数以 API 端为准")
                             .font(.system(size: 9.5, design: .rounded))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(palette.muted)
                         Spacer()
                     }
                 } else if inference.capabilities.hasRequestCounters || inference.capabilities.hasTokenCounters {
@@ -675,12 +708,12 @@ struct NodeCard: View {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 5) {
                     if snapshot.inferenceConfigured, snapshot.inferenceError == nil {
-                        ProgressView().controlSize(.mini)
+                        PulseDots(tint: palette.mutedStrong, size: 3)
                     } else if snapshot.inferenceConfigured {
                         Image(systemName: "exclamationmark.triangle")
                             .font(.system(size: 10))
                             .symbolRenderingMode(.monochrome)
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(palette.warn)
                     } else {
                         Image(systemName: "plus.circle")
                             .font(.system(size: 10))
@@ -719,47 +752,9 @@ struct NodeCard: View {
         }
     }
 
-    /// The scan proposes, the user decides. A port scan cannot tell an idle
-    /// leftover from a live endpoint, so every service found on the machine is
-    /// listed here alongside "自动" and "不显示".
-    private var sourceMenu: some View {
-        Menu {
-            Picker("", selection: Binding(
-                get: { inferenceSource },
-                set: { onChooseSource($0) }
-            )) {
-                Text("自动").tag(InferenceSource.auto)
-                if !snapshot.inferenceCandidates.isEmpty {
-                    Divider()
-                    ForEach(snapshot.inferenceCandidates) { candidate in
-                        Text(candidate.label)
-                            .tag(InferenceSource.pinned(candidate.url(forHost: snapshot.host)))
-                    }
-                }
-                Divider()
-                Text("不显示").tag(InferenceSource.hidden)
-            }
-            .pickerStyle(.inline)
-        } label: {
-            Label(sourceLabel, systemImage: "arrow.triangle.branch")
-                .font(.system(size: 9.5, weight: .medium, design: .rounded))
-                .labelStyle(.titleAndIcon)
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .help("选择这一台显示的推理服务（扫描到的服务可手动指定）")
-    }
-
-    private var sourceLabel: String {
-        switch inferenceSource {
-        case .auto: "来源"
-        case let .pinned(url):
-            url.split(separator: ":").last.map { ":\($0)" } ?? "固定"
-        case .hidden: "已隐藏"
-        }
-    }
-
+    /// The source picker itself lives in `SourceMenu` (CompactCard.swift) —
+    /// one implementation for the popover card and this rich card, so the two
+    /// cannot drift (and the offscreen yellow-blob fix happens once).
     /// Speed readout: a live number + trend while it is decoding, the engine's
     /// own native rate when it has one, otherwise "空闲" for a counter-based
     /// engine or nothing for an engine that cannot report speed at all.
@@ -775,7 +770,7 @@ struct NodeCard: View {
             // it was: the number is still true, the claim "live" is not. The
             // sparkline follows the same colour so the trend cannot look active
             // while the value is stale.
-            let tint: Color = state == .live ? .green : .secondary
+            let tint: Color = state == .live ? palette.ok : palette.muted
             HStack(alignment: .firstTextBaseline, spacing: 3) {
                 NumberUnit(
                     value: String(format: "%.0f", tps),
@@ -808,12 +803,12 @@ struct NodeCard: View {
         HStack(spacing: 5) {
             Image(systemName: "shippingbox")
                 .font(.system(size: 9))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(palette.muted)
             ForEach(snapshot.system.containers.prefix(3), id: \.name) { container in
-                Chip(text: container.name, tint: .teal)
+                Chip(text: container.name, tint: palette.memEngine)
             }
             if snapshot.system.containers.count > 3 {
-                Chip(text: "+\(snapshot.system.containers.count - 3)", tint: .secondary)
+                Chip(text: "+\(snapshot.system.containers.count - 3)", tint: palette.muted)
             }
             Spacer()
         }
@@ -828,7 +823,7 @@ struct NodeCard: View {
                         .foregroundStyle(palette.accent(for: snapshot.health.level))
                     Text(reason)
                         .font(.system(size: 10, design: .rounded))
-                        .foregroundStyle(.primary.opacity(0.85))
+                        .foregroundStyle(palette.text.opacity(0.85))
                         .lineLimit(2)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -938,12 +933,18 @@ struct PopoverView: View {
             openDetail(nil)
         } label: {
             HStack(spacing: 6) {
-                Image(systemName: "ellipsis.circle").font(.system(size: 10))
-                Text("还有 \(hiddenCount) 台未显示（共 \(model.nodes.count) 台）· 打开主窗口")
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 10))
+                    .foregroundStyle(palette.mutedStrong)
+                Text("还有 \(hiddenCount) 台未显示（共 \(model.nodes.count) 台）· ")
                     .font(.system(size: 10.5, design: .rounded))
+                    .foregroundStyle(palette.mutedStrong)
+                // 出口本身用品牌色点出来：这一行的存在意义就是「点这里看其余」。
+                Text("打开主窗口")
+                    .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                    .foregroundStyle(palette.accentText)
                 Spacer(minLength: 0)
             }
-            .foregroundStyle(.secondary)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -982,6 +983,12 @@ struct PopoverView: View {
                 }
             }
         }
+        // 语义色（.primary/.secondary/.tertiary、系统控件、Divider）跟随**解析后的
+        // 主题**而不是外层环境：离屏预览（--preview）没有窗口，colorScheme 恒为
+        // light，深色弹窗会拿到一套黑字印在黑底上——探针实测 dark 标题区最高亮度
+        // 12/255、oled 0/255（完全隐身）。真机上外层环境本就与主题一致，此修饰符
+        // 幂等，不改变真机观感。
+        .environment(\.colorScheme, palette.isDark ? .dark : .light)
     }
 
     /// The deployment banner states the shared facts exactly once: what is being
@@ -1012,6 +1019,7 @@ struct PopoverView: View {
                     + model.tasks.prefix(3).map(\.model).joined(separator: "、")
                     + (model.tasks.count > 3 ? " 等" : ""))
                     .font(.system(size: 10.5, design: .rounded))
+                    .foregroundStyle(palette.text)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 0)
@@ -1040,6 +1048,12 @@ struct PopoverView: View {
             StatusDot(level: worstLevel, palette: palette)
             Text("SparkWatch")
                 .font(.system(size: 12.5, weight: .semibold, design: .rounded))
+                .foregroundStyle(palette.textStrong)
+                // 机群一大、状态一多，这行就会被 chips 挤压——标题折行成
+                // 「SparkWa/tch」比任何空隙都难看（--demo-devices 8 实录）。
+                // 不换行、不压缩，让位策略交给右侧 ViewThatFits。
+                .lineLimit(1)
+                .fixedSize()
             let alive = model.nodes.filter { $0.source != .down }.count
             Chip(text: "\(alive)/\(model.nodes.count) 在线",
                  tint: alive == model.nodes.count ? palette.ok : palette.warn)
@@ -1051,20 +1065,38 @@ struct PopoverView: View {
                 Chip(text: "\(awaiting) 台需登录", tint: palette.warn)
             }
             Spacer(minLength: 4)
-            Text(String(format: "Live · %.0f s", model.pollSeconds))
-                .font(.system(size: 9.5, design: .monospaced))
-                .foregroundStyle(.tertiary)
-                .help("采集周期。忙碌时推理探测会加密到 2 秒，空闲时放宽到 6 秒")
+            // 右侧三件套按「采集周期先让位、时钟再让位」收缩，两个动作按钮永远
+            // 保留——400 pt 里 chips 一多，这是唯一不折行也不丢动作的办法。
+            // ViewThatFits 与 Charts.swift footer 同款。
+            ViewThatFits(in: .horizontal) {
+                headerTrailing(showClock: true, showPoll: true)
+                headerTrailing(showClock: true, showPoll: false)
+                headerTrailing(showClock: false, showPoll: false)
+            }
+        }
+        .padding(.horizontal, Theme.gutter)
+        .padding(.vertical, 8)
+    }
+
+    @ViewBuilder
+    private func headerTrailing(showClock: Bool, showPoll: Bool) -> some View {
+        HStack(spacing: 7) {
+            if showPoll {
+                Text(String(format: "Live · %.0f s", model.pollSeconds))
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                    .help("采集周期。忙碌时推理探测会加密到 2 秒，空闲时放宽到 6 秒")
+            }
             headerButton("主窗口") { openDetail(nil) }
                 .help("打开主窗口 (⌘D)")
             headerButton(model.isPaused ? "恢复" : "暂停") { onTogglePause() }
                 .help("暂停/恢复监控 (⌘P)")
-            Text(model.lastUpdate, style: .time)
-                .font(.system(size: 9.5, design: .monospaced))
-                .foregroundStyle(.tertiary)
+            if showClock {
+                Text(model.lastUpdate, style: .time)
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+            }
         }
-        .padding(.horizontal, Theme.gutter)
-        .padding(.vertical, 8)
     }
 
     private func headerButton(_ title: String, action: @escaping () -> Void) -> some View {
@@ -1077,25 +1109,34 @@ struct PopoverView: View {
     }
 
     private var footer: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 12) {
             // `awaitingCredentials` matters as much as `down` here: a node whose
             // official channel is off still shows numbers (SSH fallback), so its
             // login button used to be hidden behind a state it never entered —
             // 2026-10-16, the popover offered no way to fix the very condition the
             // menu bar was about to name.
             ForEach(model.nodes.filter { $0.source == .down || $0.awaitingCredentials }) { snapshot in
-                Button("登录 \(snapshot.name)") { loginNode = snapshot }
-                    .controlSize(.small)
+                footerButton("登录 \(snapshot.name)", tint: palette.accentText) { loginNode = snapshot }
             }
             Spacer(minLength: 0)
-            Button("设置…") { onOpenSettings() }
-                .controlSize(.small)
-            Button("退出") { NSApplication.shared.terminate(nil) }
-                .controlSize(.small)
+            footerButton("设置…", tint: palette.mutedStrong) { onOpenSettings() }
+            footerButton("退出", tint: palette.mutedStrong) { NSApplication.shared.terminate(nil) }
         }
         .padding(.horizontal, Theme.gutter)
         .padding(.top, 8)
         .padding(.bottom, 10)
+    }
+
+    /// 与 headerButton 同一语言的文本按钮。系统 Button（controlSize）在离屏渲染
+    /// 下画成暗灰块、深色弹窗里对比也不足（探针实测 footer 区最高亮度 ~94/255，
+    /// OLED 下完全隐身）；自绘加 token 后，预览与真机同一张脸。
+    private func footerButton(_ title: String, tint: Color, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                .foregroundStyle(tint)
+        }
+        .buttonStyle(.plain)
     }
 }
 

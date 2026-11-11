@@ -56,13 +56,18 @@ struct CompactCard: View {
     private var isLive: Bool { snapshot.source != .down && !snapshot.connecting }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
+        // 行距 9 + 两条弹性空隙（题头后 / 操作行前各一条）。卡高是容量契约里的
+        // 定数，内容行数却随「模型行被横幅接管与否」少一行——旧版把全部余量堆在
+        // 操作行上方，被横幅覆盖的卡悬着 ~48 pt 的洞，读作渲染事故；这里对半分给
+        // 上下，空白读作呼吸。connecting/offline 两态本来就居中，语义一致。
+        VStack(alignment: .leading, spacing: 9) {
             head
             if snapshot.connecting {
                 centred { connectingBody }
             } else if !isLive && snapshot.gpu.utilPct == nil {
                 centred { offlineBody }
             } else {
+                Spacer(minLength: 0)
                 ringRow
                 memoryRow
                 if showsModelRow { modelRow }
@@ -175,7 +180,7 @@ struct CompactCard: View {
                         key: "GPU 功耗",
                         value: snapshot.gpu.powerW.map { String(format: "%.1f", $0) } ?? "--",
                         unit: "W",
-                        tint: .secondary,
+                        tint: palette.muted,
                         help: powerHelp
                     )
                     KVBox(
@@ -200,7 +205,7 @@ struct CompactCard: View {
                         key: "SM 时钟",
                         value: snapshot.gpu.smClockMHz.map { String(format: "%.2f", $0 / 1000) } ?? "--",
                         unit: "GHz",
-                        tint: .secondary,
+                        tint: palette.muted,
                         help: "SM 当前时钟。利用率高但时钟塌到 ≤800 MHz 且功耗低，才是真的降频"
                     )
                 }
@@ -248,7 +253,7 @@ struct CompactCard: View {
                 Text(memoryCaption)
                     .font(.system(size: 10.5, weight: .semibold, design: .rounded))
                     .monospacedDigit()
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(palette.textStrong)
             }
             .help(memoryHelp)
             // A stacked bar answers "who took it", which a single-colour
@@ -312,12 +317,12 @@ struct CompactCard: View {
                 .font(.system(size: 11, weight: .semibold, design: .rounded))
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .foregroundStyle(isProbingInference ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
+                .foregroundStyle(isProbingInference ? AnyShapeStyle(palette.muted) : AnyShapeStyle(palette.textStrong))
             if let quant = snapshot.inference?.quantization {
                 Chip(text: quant.uppercased(), tint: palette.violet, compact: true)
             }
             if let ctx = snapshot.inference?.contextLength, ctx > 0 {
-                Chip(text: ctx >= 1024 ? "\(ctx / 1024)K" : "\(ctx)", tint: .secondary, compact: true)
+                Chip(text: ctx >= 1024 ? "\(ctx / 1024)K" : "\(ctx)", tint: palette.mutedStrong, compact: true)
                     .help("上下文窗口 \(ctx) tokens")
             }
             Spacer(minLength: 4)
@@ -369,12 +374,12 @@ struct CompactCard: View {
                     Text(SpeedDisplay.text(rate: tps, age: inference.decodeTPSAge, stopped: state == .stopped))
                         .font(.system(size: 11, weight: .semibold, design: .rounded))
                         .monospacedDigit()
-                        .foregroundStyle(state == .live ? palette.ok : Color.secondary)
+                        .foregroundStyle(state == .live ? palette.ok : palette.muted)
                         // 速度这一对（数字 + 单位）在窄卡片里也要保持一行。
                         .lineLimit(1)
                         .minimumScaleFactor(0.85)
                         .fixedSize(horizontal: true, vertical: false)
-                    Sparkline(values: trends, tint: state == .live ? palette.ok : .secondary)
+                    Sparkline(values: trends, tint: state == .live ? palette.ok : palette.muted)
                         .frame(width: 46, height: 14)
                         .opacity(state == .live ? 1 : 0.6)
                 }
@@ -405,18 +410,18 @@ struct CompactCard: View {
                                    tint: waiting > 0 ? palette.warn : .secondary))
             }
             if let acceptance = inference.acceptancePct {
-                items.append(.init(key: "MTP", value: String(format: "%.0f%%", acceptance), tint: .secondary))
+                items.append(.init(key: "MTP", value: String(format: "%.0f%%", acceptance), tint: palette.muted))
             }
             if let hit = inference.cacheHitPct {
-                items.append(.init(key: "命中", value: String(format: "%.0f%%", hit), tint: .secondary))
+                items.append(.init(key: "命中", value: String(format: "%.0f%%", hit), tint: palette.muted))
             }
             if let oldest = inference.oldestSeconds, oldest >= 1 {
-                items.append(.init(key: "最老", value: String(format: "%.0fs", oldest), tint: .secondary))
+                items.append(.init(key: "最老", value: String(format: "%.0fs", oldest), tint: palette.muted))
             }
         }
         if items.isEmpty, snapshot.health.reasons.isEmpty {
             items.append(.init(key: "负载", value: String(format: "%.2f", snapshot.system.load1 ?? 0),
-                               tint: .secondary))
+                               tint: palette.muted))
         }
         return StatLine(
             items: items,
@@ -510,7 +515,8 @@ struct CompactCard: View {
 
     private var connectingBody: some View {
         HStack(spacing: 9) {
-            ProgressView().controlSize(.small)
+            // 自绘脉冲点：系统 ProgressView 离屏渲染是黄块加禁止符（与 Picker 同病）。
+            PulseDots(tint: palette.mutedStrong)
             VStack(alignment: .leading, spacing: 2) {
                 Text("正在连接…")
                     .font(.system(size: 11.5, design: .rounded))
@@ -538,9 +544,20 @@ struct CompactCard: View {
                     .foregroundStyle(.tertiary)
             }
             Spacer(minLength: 0)
-            Button("登录") { onLogin() }
-                .controlSize(.small)
+            plainButton("登录", tint: palette.accentText, action: onLogin)
         }
+    }
+
+    /// 与头部/操作按钮同一语言的文本按钮。系统 Button（controlSize）在离屏渲染
+    /// 下画成暗灰块、深色弹窗里对比也不足（footer 区探针实测最高亮度 ~94/255）；
+    /// 自绘加 token 后，预览与真机同一张脸。
+    private func plainButton(_ title: String, tint: Color, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                .foregroundStyle(tint)
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Helpers
@@ -581,44 +598,153 @@ struct CompactCard: View {
 /// The scan proposes, the user decides. A port scan cannot tell an idle leftover
 /// from a live endpoint, so every service found on the machine is offered
 /// alongside 自动 and 不显示.
+///
+/// 渲染要点：菜单**内容**用 Button 项而不是 Picker。离屏渲染（--preview）下
+/// Picker 会落成 NSSegmentedControl/NSPopUpButton 的黄色大色块加 🚫（设置窗
+/// 预览里整屏同款；Charts.swift 的 spanSelector 为同一病修过一次）——Button
+/// 菜单项是纯 SwiftUI，离屏与真机同一张脸。触发器也自画：文本 + 7.5 pt
+/// chevron，不再把「▾」塞进字符串。
 struct SourceMenu: View {
     var snapshot: NodeSnapshot
     var source: InferenceSource
     var onChoose: (InferenceSource) -> Void
     var palette: Palette
 
-    var body: some View {
-        Menu {
-            Picker("", selection: Binding(get: { source }, set: { onChoose($0) })) {
-                Text("自动").tag(InferenceSource.auto)
-                if !snapshot.inferenceCandidates.isEmpty {
-                    Divider()
-                    ForEach(snapshot.inferenceCandidates) { candidate in
-                        Text(candidate.label)
-                            .tag(InferenceSource.pinned(candidate.url(forHost: snapshot.host)))
-                    }
-                }
-                Divider()
-                Text("不显示").tag(InferenceSource.hidden)
-            }
-            .pickerStyle(.inline)
-        } label: {
-            Text(label)
-                .font(.system(size: 10.5, weight: .medium, design: .rounded))
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .foregroundStyle(palette.accentText)
-        .help("选择这一台显示的推理服务（可手动指定扫描到的服务）")
+    private struct SourceOption: Identifiable {
+        let id: String
+        let label: String
+        let source: InferenceSource
     }
+
+    private var options: [SourceOption] {
+        var options = [SourceOption(id: "auto", label: "自动", source: .auto)]
+        options += snapshot.inferenceCandidates.map { candidate in
+            SourceOption(
+                id: candidate.label,
+                label: candidate.label,
+                source: .pinned(candidate.url(forHost: snapshot.host))
+            )
+        }
+        options.append(SourceOption(id: "hidden", label: "不显示", source: .hidden))
+        return options
+    }
+
+    var body: some View {
+        let trigger = HStack(spacing: 3) {
+            Text(label)
+            Image(systemName: "chevron.down")
+                .font(.system(size: 7.5, weight: .bold))
+        }
+        .font(.system(size: 10.5, weight: .medium, design: .rounded))
+        .foregroundStyle(palette.accentText)
+        .contentShape(Rectangle())
+        if Self.isPreviewRender {
+            // 离屏渲染没有交互；而且 NSViewRepresentable 在 ImageRenderer 下会
+            // 被画成黄底 🚫 占位块（实测，设置窗整屏同款）。预览里只渲染真机上
+            // 看得见的触发器本体，画面对真机诚实。
+            trigger
+        } else {
+            trigger.overlay {
+                SourceMenuAnchor(
+                    options: options.map { ($0.label, $0.source) },
+                    selected: source,
+                    onChoose: onChoose,
+                    helpText: "选择这一台显示的推理服务（可手动指定扫描到的服务）"
+                )
+            }
+        }
+    }
+
+    /// --preview / --preview-* 离屏渲染判别（只看进程参数，一次计算）。
+    static let isPreviewRender: Bool = {
+        let args = ProcessInfo.processInfo.arguments
+        return args.contains("--preview") || args.contains { $0.hasPrefix("--preview-") }
+    }()
 
     private var label: String {
         switch source {
-        case .auto: "来源 ▾"
+        case .auto: "来源"
         case let .pinned(url):
-            url.split(separator: ":").last.map { ":\($0) ▾" } ?? "固定 ▾"
-        case .hidden: "已隐藏 ▾"
+            url.split(separator: ":").last.map { ":\($0)" } ?? "固定"
+        case .hidden: "已隐藏"
         }
+    }
+}
+
+/// 菜单项的点击落点。NSMenuItem 对 target 只弱引用，把 action 同时塞进
+/// representedObject 强持有，保证菜单打开期间闭包活着。
+final class SourceMenuAction: NSObject {
+    let source: InferenceSource
+    let onChoose: (InferenceSource) -> Void
+
+    init(source: InferenceSource, onChoose: @escaping (InferenceSource) -> Void) {
+        self.source = source
+        self.onChoose = onChoose
+    }
+
+    @objc func fire(_ sender: NSMenuItem?) { onChoose(source) }
+}
+
+final class SourceMenuCoordinator: NSObject {
+    var build: (() -> NSMenu)?
+
+    @objc func present(_ sender: NSClickGestureRecognizer) {
+        guard let view = sender.view, let menu = build?() else { return }
+        menu.popUp(
+            positioning: nil,
+            at: NSPoint(x: 0, y: view.bounds.maxY + 2),
+            in: view
+        )
+    }
+}
+
+/// 点击层：一层**不画任何东西**的 NSView，点击时把真正的 NSMenu 弹出来。
+/// SwiftUI 的 Menu/Picker 表达在离屏渲染（ImageRenderer）下都会落成黄底 🚫
+/// 色块——设置窗预览整屏同款，Charts.swift 的 spanSelector 为同一病修过一次；
+/// 不画东西的 NSView 没有这个问题。真机上它就是一枚普通菜单触发器。
+struct SourceMenuAnchor: NSViewRepresentable {
+    var options: [(String, InferenceSource)]
+    var selected: InferenceSource
+    var onChoose: (InferenceSource) -> Void
+    var helpText: String
+
+    func makeCoordinator() -> SourceMenuCoordinator { SourceMenuCoordinator() }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        view.toolTip = helpText
+        let gesture = NSClickGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(SourceMenuCoordinator.present(_:))
+        )
+        view.addGestureRecognizer(gesture)
+        context.coordinator.build = { [self] in menu() }
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        context.coordinator.build = { [self] in menu() }
+        view.toolTip = helpText
+    }
+
+    private func menu() -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for (index, option) in options.enumerated() {
+            // 分隔线复刻原 Picker 的三段结构：自动 | 扫描到的服务 | 不显示。
+            if index == 1 || index == options.count - 1 {
+                menu.addItem(NSMenuItem.separator())
+            }
+            let action = SourceMenuAction(source: option.1, onChoose: onChoose)
+            let item = NSMenuItem(
+                title: (option.1 == selected ? "✓ " : "") + option.0,
+                action: #selector(SourceMenuAction.fire(_:)),
+                keyEquivalent: ""
+            )
+            item.target = action
+            item.representedObject = action
+            menu.addItem(item)
+        }
+        return menu
     }
 }

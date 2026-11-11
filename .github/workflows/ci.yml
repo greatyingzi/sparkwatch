@@ -35,8 +35,10 @@ jobs:
       - name: Build and test
         run: |
           set -o pipefail
-          swift build 2>&1 | tail -40
-          swift test 2>&1 | tail -40
+          swift build 2>&1 | tee /tmp/build.log | tail -5
+          grep -E "error:" /tmp/build.log | head -30 || true
+          swift test 2>&1 | tee /tmp/test.log | tail -5
+          grep -E "error:|failed" /tmp/test.log | head -30 || true
 
       - name: Package (not published)
         run: |

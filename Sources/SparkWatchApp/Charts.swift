@@ -122,6 +122,29 @@ struct GpuHistoryChart: View {
                 String(format: "%.0f W", $0)
             }
             .padding(.top, 12)
+            // 时间轴放图块**最底部**（主人判：夹在主图与温度带中间很丑）；
+            // 十字线在这里补最后一段——纵线从主图顶贯穿到轴底，不再断。
+            GeometryReader { axisProxy in
+                let axisWidth = axisProxy.size.width - labelColumn
+                ZStack(alignment: .topLeading) {
+                    timeAxis(plotWidth: axisWidth)
+                    if hoverIndex != nil {
+                        crosshair(x: hoverX ?? 0, height: 14)
+                            .offset(x: labelColumn)
+                    }
+                }
+                .onContinuousHover { phase in
+                    switch phase {
+                    case .active(let hover):
+                        setHover(hover.x - labelColumn, plotWidth: axisWidth)
+                    case .ended:
+                        setHover(nil, plotWidth: axisWidth)
+                    @unknown default:
+                        break
+                    }
+                }
+            }
+            .frame(height: 14)
             footer(data)
                 .padding(.top, 12)
         }
@@ -243,11 +266,6 @@ struct GpuHistoryChart: View {
                 }
             }
             .frame(height: 190)
-
-            GeometryReader { axisProxy in
-                timeAxis(plotWidth: axisProxy.size.width - labelColumn)
-            }
-            .frame(height: 14)
         }
     }
 
@@ -454,7 +472,7 @@ struct GpuHistoryChart: View {
                 Text(label)
                     .font(.system(size: 9.5, weight: .medium))
                     .foregroundStyle(.secondary)
-                    .frame(width: labelColumn - 6, alignment: .leading)
+                    .frame(width: labelColumn, alignment: .leading)
                 ZStack(alignment: .topLeading) {
                     verticalTicks(width: plotWidth, height: height)
                     areaPath(values, width: plotWidth, height: height, y: y)

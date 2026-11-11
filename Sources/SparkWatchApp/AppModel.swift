@@ -284,7 +284,8 @@ final class AppModel: ObservableObject {
 
     // MARK: - Ledger access
 
-    private func mirrorLedgers() {
+    /// internal：RealDataFeeder 投喂后由预览流程显式镜像一次。
+    func mirrorLedgers() {
         let now = Date()
         energySnapshot = ledgers.energy.snapshot(now: now)
         hourlyWatts = ledgers.energy.hourlyWatts(hours: 24, now: now)

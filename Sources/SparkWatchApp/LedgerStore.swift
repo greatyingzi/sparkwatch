@@ -63,6 +63,32 @@ final class LedgerStore {
         return ids.sorted()
     }
 
+    // MARK: - 真实数据回放投喂（--feed-real，RealDataFeeder 专用薄通道）
+    // Core 结构的存储对 App 模块不可见；这里给出喂入/提取的最小公开面。
+
+    func feedHistory(_ point: GpuHistory.Point, nodeID: UUID) {
+        history.record(point, nodeID: nodeID)
+    }
+
+    func feedEnergy(nodeID: UUID, at now: Date, watts: Double?) {
+        energy.record(nodeID: nodeID, at: now, watts: watts, outputTokens: nil,
+                      countEnergy: true, countTokens: false)
+    }
+
+    func feedTokens(nodeID: UUID, port: Int, model: String,
+                    prompt: Double, completion: Double, cached: Double, at now: Date) {
+        tokens.observe(nodeID: nodeID, port: port, model: model,
+                       prompt: prompt, completion: completion, cached: cached, at: now)
+    }
+
+    func tokenFeedSlice(startHour: Int, hours: Int) -> [TokenLedger.TokenFeedSlice] {
+        tokens.feedSlice(startHour: startHour, hours: hours)
+    }
+
+    func recordedWatts(atMinute minute: Int) -> Double? {
+        energy.recordedWatts(atMinute: minute)
+    }
+
     init(readOnly: Bool = false, directory: URL? = nil) {
         self.readOnly = readOnly
         self.directory = directory ?? SettingsStore.directory

@@ -201,6 +201,13 @@ public struct EnergyLedger: Sendable, Codable {
         return out
     }
 
+    /// 回放投喂：某分钟的**真实记录**整机瓦数（wh ÷ 覆盖毫秒）。该分钟无覆盖
+    /// 返回 nil——调用方沿用上一 known 值，不造数。
+    public func recordedWatts(atMinute minute: Int) -> Double? {
+        guard let bucket = buckets[minute], bucket.coveredMs > 0 else { return nil }
+        return bucket.wh * 3_600_000 / bucket.coveredMs
+    }
+
     /// GB10 没有整机功率计（已实测：无 RAPL、无 hwmon 功率传感器、无 IMC/RAPL、无 BMC），
     /// 所以整机瓦数必须建模。这个公式就是模型本体，系数可调。
     ///

@@ -221,6 +221,45 @@ public struct TokenLedger: Sendable, Codable {
             .sorted { $0.completion > $1.completion }
     }
 
+    /// 回放投喂计划（--feed-real）：段内 [startHour, startHour+hours) 每个
+    /// series×model 的增量总和与最后已知计数。series 内部结构对 App 模块
+    /// 不可见，这里一次给出喂 token 账所需的全部数字。
+    public struct TokenFeedSlice: Sendable, Equatable {
+        public var nodeID: UUID
+        public var port: Int
+        public var model: String
+        public var lastPrompt: Double
+        public var lastCompletion: Double
+        public var lastCached: Double
+        public var segmentPrompt: Double
+        public var segmentCompletion: Double
+        public var segmentCached: Double
+    }
+
+    public func feedSlice(startHour: Int, hours: Int) -> [TokenFeedSlice] {
+        var out: [TokenFeedSlice] = []
+        for (key, state) in series {
+            for (model, hoursMap) in state.models {
+                var prompt = 0.0, completion = 0.0, cached = 0.0
+                for hour in startHour..<(startHour + max(1, hours)) {
+                    if let counts = hoursMap[hour] {
+                        prompt += counts.prompt
+                        completion += counts.completion
+                        cached += counts.cached
+                    }
+                }
+                out.append(TokenFeedSlice(
+                    nodeID: key.nodeID, port: key.port, model: model,
+                    lastPrompt: state.lastPrompt ?? 0,
+                    lastCompletion: state.lastCompletion ?? 0,
+                    lastCached: state.lastCached ?? 0,
+                    segmentPrompt: prompt, segmentCompletion: completion, segmentCached: cached
+                ))
+            }
+        }
+        return out
+    }
+
     /// 最近 N 天的 completion，按 UTC 日（yyyy-MM-dd），缺日为 0；索引 0 = 最早一天。
     public func dailyCompletion(days: Int, now: Date) -> [(day: String, completion: Double)] {
         guard days > 0 else { return [] }

@@ -968,6 +968,18 @@ if let index = CommandLine.arguments.firstIndex(of: "--preview-main"),
             model.setTokenDay(selectDay)
             model.setEnergyDay(selectDay)
         }
+        // --feed-real：把已加载账本（--data-dir）的一段真实窗口循环投喂，
+        // 渲染出的「现在」端是喂过之后的活动状态；--seconds 控制投喂秒数。
+        if CommandLine.arguments.contains("--feed-real"),
+            let feeder = RealDataFeeder(ledgers: model.ledgers)
+        {
+            let feedSeconds = CommandLine.arguments.firstIndex(of: "--seconds").flatMap { position in
+                position + 1 < CommandLine.arguments.count ? Double(CommandLine.arguments[position + 1]) : nil
+            } ?? 12
+            feeder.feedTicks(max(1, Int(feedSeconds / 2)))
+            model.mirrorLedgers()
+            print("  feed: ticks=\(feeder.fedTicks)")
+        }
         if let theme = previewThemeOverride() {
             model.overrideTheme(theme)
             if let appearance = theme.nsAppearance { NSAppearance.current = appearance }

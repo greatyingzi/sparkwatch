@@ -35,10 +35,15 @@ jobs:
       - name: Build and test
         run: |
           set -o pipefail
-          swift build 2>&1 | tee /tmp/build.log | tail -5
+          set -o pipefail
+          swift build 2>&1 | tee /tmp/build.log | tail -40 || BUILD_EC=$?
+          echo "build exit: ${BUILD_EC:-0}"
           grep -E "error:" /tmp/build.log | head -30 || true
-          swift test 2>&1 | tee /tmp/test.log | tail -5
-          grep -E "error:|failed" /tmp/test.log | head -30 || true
+          if [ "${BUILD_EC:-0}" != "0" ]; then exit "$BUILD_EC"; fi
+          swift test 2>&1 | tee /tmp/test.log | tail -40 || TEST_EC=$?
+          echo "test exit: ${TEST_EC:-0}"
+          grep -E "error:|✘" /tmp/test.log | head -30 || true
+          if [ "${TEST_EC:-0}" != "0" ]; then exit "$TEST_EC"; fi
 
       - name: Package (not published)
         run: |

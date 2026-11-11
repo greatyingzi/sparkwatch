@@ -685,6 +685,7 @@ final class SourceMenuAction: NSObject {
     @objc func fire(_ sender: NSMenuItem?) { onChoose(source) }
 }
 
+@MainActor
 final class SourceMenuCoordinator: NSObject {
     var build: (() -> NSMenu)?
 

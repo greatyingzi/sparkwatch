@@ -69,14 +69,17 @@ public enum InferenceProbeError: Error {
 
 public struct DirectTransport: MetricsTransport {
     private let session: URLSession
+    private let apiKey: String?
 
-    public init(timeout: TimeInterval = 8) {
+    public init(timeout: TimeInterval = 8, apiKey: String? = nil) {
         self.session = HTTP.noProxySession(timeout: timeout)
+        self.apiKey = apiKey
     }
 
     public func get(_ url: URL, timeout: TimeInterval) async throws -> (body: Data, status: Int) {
         var request = URLRequest(url: url)
         request.timeoutInterval = timeout
+        if let key = apiKey { request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
         let (data, response) = try await session.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? -1
         return (data, status)
@@ -86,10 +89,12 @@ public struct DirectTransport: MetricsTransport {
 public struct SshCurlTransport: MetricsTransport {
     public let user: String
     public let host: String
+    public let apiKey: String?
 
-    public init(user: String, host: String) {
+    public init(user: String, host: String, apiKey: String? = nil) {
         self.user = user
         self.host = host
+        self.apiKey = apiKey
     }
 
     public func get(_ url: URL, timeout: TimeInterval) async throws -> (body: Data, status: Int) {
@@ -97,8 +102,9 @@ public struct SshCurlTransport: MetricsTransport {
         // the remote box against its own loopback.
         let path = url.path.isEmpty ? "/" : url.path
         let port = url.port ?? 80
+        let auth = apiKey.map { "-H 'Authorization: Bearer \($0)' " } ?? ""
         let script = """
-        curl -s -m \(Int(timeout)) -o /tmp/.sw_probe.$$ -w '%{http_code}' http://127.0.0.1:\(port)\(path); \
+        curl -s -m \(Int(timeout)) \(auth)-o /tmp/.sw_probe.$$ -w '%{http_code}' http://127.0.0.1:\(port)\(path); \
         echo; cat /tmp/.sw_probe.$$ 2>/dev/null; rm -f /tmp/.sw_probe.$$
         """
         let output = try await SshRunner.run(user: user, host: host, script: script, timeout: timeout + 6)
@@ -161,6 +167,27 @@ public struct InferenceProbe: Sendable {
             {
                 Self.mergeTensorFoldHealth(health, into: &sample)
             }
+            return sample
+        }
+
+        // 1b. TensorFold without keyed /metrics: /health alone names the model and
+        // the live counts (this deployment keeps /health open).
+        if let health = try await fetchJSON(base: base, path: "health"),
+            ((health["status"] as? String) == "ok" && health["max_batch_size"] != nil)
+                || (health["ok"] as? Bool) == true
+        {
+            var sample = InferenceSample()
+            sample.engine = EngineKind.tensorFold.label
+            sample.endpoint = base.absoluteString
+            var model: String? = (health["model"] as? String)
+                ?? ((health["model_ids"] as? [String])?.first)
+            if model == nil { model = await modelName(base: base) }
+            sample.model = model
+            Self.mergeTensorFoldHealth(health, into: &sample)
+            sample.capabilities = .init(
+                hasTokenCounters: health["completion_tokens_total"] != nil,
+                hasRequestCounters: health["requests_total"] != nil,
+                hasSpeed: true, hasModelDetail: true)
             return sample
         }
 

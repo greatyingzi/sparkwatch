@@ -919,7 +919,7 @@ public actor NodeRuntime {
                         && Date().timeIntervalSince(directBlockedAt) < 300
                     do {
                         if skipDirect { throw InferenceProbeError.directKnownBlocked }
-                        sample = try await inferenceProbe.probe(baseURL: loopback)
+                        sample = try await InferenceProbe(transport: DirectTransport(apiKey: config.inferenceApiKey)).probe(baseURL: loopback)
                         directBlockedURL = nil
                         inferenceError = nil
                         consecutiveInferenceFailures = 0
@@ -927,7 +927,7 @@ public actor NodeRuntime {
                         let direct = String(describing: error)
                         // Same probe, different transport: curl on the box itself.
                         let viaSsh = InferenceProbe(
-                            transport: SshCurlTransport(user: config.sshUser, host: config.sshHost)
+                            transport: SshCurlTransport(user: config.sshUser, host: config.sshHost, apiKey: config.inferenceApiKey)
                         )
                         sample = try await viaSsh.probe(baseURL: url)
                         // Only the *raw remote URL* is worth remembering as blocked: if
@@ -1094,6 +1094,18 @@ public actor NodeRuntime {
                             + " reset=\(rateTracker.didResetCounters ? 1 : 0)"
                             + " util=\(gpu.utilPct.map { String(format: "%.0f", $0) } ?? "nil")\n"
                         FileHandle.standardError.write(Data(line.utf8))
+                    }
+                    // No alias configured anywhere: if the endpoint names no model
+                    // (keyed /v1/models or a minimal /health), say what the process
+                    // table says is loaded. A container path (/model) names nothing,
+                    // so it is skipped rather than shown as a fake model.
+                    if sample.model == nil,
+                        let key = processes.first(where: {
+                            let k = $0.modelKey ?? ""
+                            return k.hasPrefix("/") && k != "/model"
+                        })?.modelKey
+                    {
+                        sample.model = ClusterTaskBuilder.shortModelName(key)
                     }
                     inference = sample
                     lastInferenceSuccess = Date()

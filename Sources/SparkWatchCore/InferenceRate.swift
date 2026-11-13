@@ -118,9 +118,13 @@ public enum InferenceRateResolver {
         if let gaugeRate, gaugeRate > 0.5, gaugeRate.isFinite {
             return RateResolution(tps: gaugeRate, source: "gauge", counterStale: false)
         }
-        if justFinished, hasLiveSource {
-            // The counter jump belongs to the request that just ended, not to this
-            // sampling window. Divide it by engine-time when the engine counts it.
+        // A boundary-published counter (TensorFold) must never be divided by the
+        // sample window: at a request end it jumps by the whole reply, and with
+        // another stream still running justFinished is false, so the old order
+        // fell through to wallRate and showed hundreds of tok/s. Once a live
+        // source has been seen, the counter only passes through engine-time
+        // (dtokens / ddecode-seconds), never wall time.
+        if hasLiveSource {
             if let engineRate, engineRate > 0.5, engineRate.isFinite {
                 return RateResolution(tps: engineRate, source: "engine", counterStale: false)
             }

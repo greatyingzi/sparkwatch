@@ -77,7 +77,8 @@ if let index = arguments.firstIndex(of: "--render"), index + 1 < arguments.count
     let url = arguments[index + 1]
     let samples = arguments.firstIndex(of: "--samples").flatMap { $0 + 1 < arguments.count ? Int(arguments[$0 + 1]) : nil } ?? 3
     let interval = arguments.firstIndex(of: "--interval").flatMap { $0 + 1 < arguments.count ? Double(arguments[$0 + 1]) : nil } ?? 1.5
-    let probe = InferenceProbe()
+    let renderKey = arguments.firstIndex(of: "--key").flatMap { $0 + 1 < arguments.count ? arguments[$0 + 1] : nil }
+    let probe = InferenceProbe(transport: DirectTransport(apiKey: renderKey))
     // The same four sources, in the same order, as the collector — otherwise the
     // probe would bless a number the app would never show.
     var decodeTracker = TokenRateTracker()

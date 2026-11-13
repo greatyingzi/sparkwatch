@@ -84,6 +84,8 @@ public struct NodeConfig: Codable, Identifiable, Sendable, Equatable {
     /// Optional OpenAI/Prometheus metrics base, e.g. `http://100.64.0.1:18300`.
     /// Scraped directly over the tailnet — no tunnel, no credentials.
     public var inferenceMetricsURL: String?
+    /// Optional bearer key for the inference endpoint (metrics/models).
+    public var inferenceApiKey: String?
     /// `auto` (probe the endpoint) or a fixed engine label. Kept as a string so
     /// hand-written config files stay readable.
     public var inferenceEngine: String = "auto"
@@ -105,6 +107,7 @@ public struct NodeConfig: Codable, Identifiable, Sendable, Equatable {
         sshUser: String = NSUserName(),
         dashboardLocalPort: Int = 19100,
         inferenceMetricsURL: String? = nil,
+        inferenceApiKey: String? = nil,
         inferenceEngine: String = "auto",
         autoDiscover: Bool = true,
         enabled: Bool = true
@@ -115,6 +118,7 @@ public struct NodeConfig: Codable, Identifiable, Sendable, Equatable {
         self.sshUser = sshUser
         self.dashboardLocalPort = dashboardLocalPort
         self.inferenceMetricsURL = inferenceMetricsURL
+        self.inferenceApiKey = inferenceApiKey
         self.inferenceEngine = inferenceEngine
         self.autoDiscover = autoDiscover
         self.enabled = enabled
@@ -133,6 +137,7 @@ public struct NodeConfig: Codable, Identifiable, Sendable, Equatable {
         self.sshUser = try container.decodeIfPresent(String.self, forKey: .sshUser) ?? NSUserName()
         self.dashboardLocalPort = try container.decodeIfPresent(Int.self, forKey: .dashboardLocalPort) ?? 19100
         self.inferenceMetricsURL = try container.decodeIfPresent(String.self, forKey: .inferenceMetricsURL)
+        self.inferenceApiKey = try container.decodeIfPresent(String.self, forKey: .inferenceApiKey)
         self.inferenceEngine = try container.decodeIfPresent(String.self, forKey: .inferenceEngine) ?? "auto"
         self.inferenceSource = try container.decodeIfPresent(
             InferenceSource.self, forKey: .inferenceSource

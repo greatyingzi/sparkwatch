@@ -274,14 +274,21 @@ extension EnergyLedger {
 
         // 单遍扫分钟桶（≤ 44640 只）：分钟 → 本地日串按 key 缓存。
         var byDay: [String: (wh: Double, coveredMs: Double)] = [:]
-        var dayOfMinute: [Int: String] = [:]
+        // 日串按**小时**缓存（≤ 24×保留期 次格式化），不按分钟——4.4 万只分钟桶
+        // 每只都走一遍 DateFormatter 曾是 mirrorLedgers 第二热的帧（sample 实测
+        // daily ≈ 20 ms/次，udat_format 占大头）。归属口径与 token 版 daily 同一
+        // 契约：桶按 UTC 整分对齐，整除 60 取整点归属；非整小时时区压在日界上的
+        // 桶按起点归属（见 token daily 同款注释）。主人的时区（上海）整小时偏移，
+        // 结果与逐分钟归属逐桶一致。
+        var dayOfHour: [Int: String] = [:]
         for (minuteKey, bucket) in buckets {
+            let hourKey = minuteKey / 60
             let day: String
-            if let cachedDay = dayOfMinute[minuteKey] {
+            if let cachedDay = dayOfHour[hourKey] {
                 day = cachedDay
             } else {
-                day = formatter.string(from: Date(timeIntervalSince1970: Double(minuteKey) * 60))
-                dayOfMinute[minuteKey] = day
+                day = formatter.string(from: Date(timeIntervalSince1970: Double(hourKey) * 3600))
+                dayOfHour[hourKey] = day
             }
             var entry = byDay[day] ?? (0, 0)
             entry.wh += bucket.wh

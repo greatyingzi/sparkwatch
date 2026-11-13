@@ -9,7 +9,7 @@ import SwiftUI
 // a wall of monospaced text in a grey menu. The popover below is the real UI.)
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var statusItem: NSStatusItem!
     private var popover = NSPopover()
     private var model: AppModel!
@@ -74,20 +74,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
 
-        hosting = NSHostingController(rootView: PopoverView(model: model) { [weak self] in
-            self?.openSettings()
-        } onTogglePause: { [weak self] in
-            self?.togglePause()
-        } onOpenDetail: { [weak self] nodeID in
-            guard let self else { return }
-            // The popover is transient; leaving it open behind the window would
-            // both cover the screen and read as "the click did nothing".
-            self.popover.performClose(nil)
-            MainWindowManager.shared.show(model: self.model, focusing: nodeID)
-        })
         popover.behavior = .transient
         popover.animates = true
-        popover.contentViewController = hosting
+        popover.delegate = self
+        // 弹窗内容**懒建**：不在启动时挂 contentViewController（一挂整棵
+        // SwiftUI 树就实例化，之后每个采样都会在主线程重渲染整个仪表盘——
+        // 哪怕弹窗关着）。open 时由 togglePopover 原地重建，关闭时整体释放。
         applyThemeAppearance()
 
         let demoCount = CommandLine.arguments.firstIndex(of: "--demo-devices").flatMap { index in
@@ -218,6 +210,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         togglePopover()
     }
 
+    /// 弹窗内容的唯一构建点（open 时调用；关闭时整体释放，见 popoverDidClose）。
+    private func makePopoverContent() -> NSHostingController<PopoverView> {
+        NSHostingController(rootView: PopoverView(model: model) { [weak self] in
+            self?.openSettings()
+        } onTogglePause: { [weak self] in
+            self?.togglePause()
+        } onOpenDetail: { [weak self] nodeID in
+            guard let self else { return }
+            // The popover is transient; leaving it open behind the window would
+            // both cover the screen and read as "the click did nothing".
+            self.popover.performClose(nil)
+            MainWindowManager.shared.show(model: self.model, focusing: nodeID)
+        })
+    }
+
     private func togglePopover() {
         guard let button = statusItem.button else { return }
         if popover.isShown {
@@ -228,9 +235,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Fresh data on open: the popover answers "what is it doing right now".
         Task {
             await model.refresh()
+            // 先建树再量尺寸：弹窗关闭期间视图树不存在（懒建+关时释放），
+            // 这里是它唯一的重建点；sizeThatFits 测的是这棵树，必须先挂上。
+            hosting = makePopoverContent()
+            popover.contentViewController = hosting
             updateTitleAndSize()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         }
+    }
+
+    /// 关闭即释放：弹窗是全 App 最重的一棵 SwiftUI 树（整个仪表盘）。
+    /// 关着还挂着的话，每个采样（0.5 Hz）都会在主线程白白重渲染一遍——
+    /// 滚动主窗时就周期性顿一下。下次打开由 togglePopover 原地重建。
+    func popoverDidClose(_ notification: Notification) {
+        popover.contentViewController = nil
+        hosting = nil
     }
 
     private func showContextMenu() {
@@ -393,28 +412,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func updateTitleAndSize() {
         // Attributed so the health colours show in the menu bar itself.
-        statusItem.button?.attributedTitle = model.statusBarAttributed
+        // **值没变就不碰 AppKit**：每秒 set 一次会触发状态项重排，值相等时纯属空转。
+        if statusItem.button?.attributedTitle != model.statusBarAttributed {
+            statusItem.button?.attributedTitle = model.statusBarAttributed
+        }
 
         // Size the popover from what it actually needs, capped by what the
         // *screen* actually allows. The old cap was a hard-coded 900 — larger
         // than the usable height of a 1440x900 display — so it could not stop a
         // squeeze, and a squeezed popover is what makes text overlap.
-        let fitting = hosting.sizeThatFits(in: NSSize(width: Theme.popoverWidth, height: 1400))
-        let wanted = NSSize(
-            width: Theme.popoverWidth,
-            height: min(max(fitting.height, 180), Theme.availableHeight)
-        )
-        if abs(popover.contentSize.height - wanted.height) > 1
-            || popover.contentSize.width != wanted.width
-        {
-            popover.contentSize = wanted
+        //
+        // **只在弹窗可见时测量**：sizeThatFits 是对整棵 PopoverView 的全量布局，
+        // 弹窗关着也每秒量一次曾是每秒主线程账单的大头（主人报「滚动卡顿、
+        // 十字线迟滞」的每秒风暴之一）。关闭期间沿用上次尺寸；打开前
+        // togglePopover 会先量一遍，展示尺寸永远新鲜。
+        var popoverSize: NSSize? = nil
+        var fitting: NSSize? = nil
+        if popover.isShown {
+            let measured = hosting.sizeThatFits(in: NSSize(width: Theme.popoverWidth, height: 1400))
+            let wanted = NSSize(
+                width: Theme.popoverWidth,
+                height: min(max(measured.height, 180), Theme.availableHeight)
+            )
+            if abs(popover.contentSize.height - wanted.height) > 1
+                || popover.contentSize.width != wanted.width
+            {
+                popover.contentSize = wanted
+            }
+            popoverSize = wanted
+            fitting = measured
         }
 
         // The popover cannot be screenshotted from a script (AX cannot open it),
         // so its real size is logged instead: this is the number that proves the
         // content fits the screen rather than being squeezed into it.
         appendDebugIfRequested(
-            popoverSize: wanted,
+            popoverSize: popoverSize,
             fitting: fitting,
             budget: Theme.availableHeight
         )
@@ -835,6 +868,7 @@ if let index = CommandLine.arguments.firstIndex(of: "--preview-settings"),
     let path = CommandLine.arguments[index + 1]
     application.setActivationPolicy(.accessory)
     Task { @MainActor in
+        GpuChartRenderContext.offscreen = true
         let model = AppModel(collector: ClusterCollector(), readOnlyLedgers: true, ledgerDirectory: previewDataDir())
         await model.start()
         for _ in 0..<20 {
@@ -934,6 +968,7 @@ if let index = CommandLine.arguments.firstIndex(of: "--preview-main"),
     }
     application.setActivationPolicy(.accessory)
     Task { @MainActor in
+        GpuChartRenderContext.offscreen = true
         let model = AppModel(collector: ClusterCollector(), readOnlyLedgers: true, ledgerDirectory: previewDataDir())
         // `--seconds N` forces a real collection window: the ledgers integrate over
         // time (energy is minutes, history is sampled per tick), so a render that
@@ -1039,6 +1074,7 @@ if let index = CommandLine.arguments.firstIndex(of: "--preview-detail"),
         position + 1 < CommandLine.arguments.count ? Double(CommandLine.arguments[position + 1]) : nil
     } ?? 1020
     Task { @MainActor in
+        GpuChartRenderContext.offscreen = true
         let model = AppModel(collector: ClusterCollector(), readOnlyLedgers: true, ledgerDirectory: previewDataDir())
         if let demoCount {
             model.useDemoData(nodeCount: demoCount)
@@ -1099,6 +1135,7 @@ if let index = CommandLine.arguments.firstIndex(of: "--preview"),
     }
     application.setActivationPolicy(.accessory)
     Task { @MainActor in
+        GpuChartRenderContext.offscreen = true
         let startedAt = Date()
         let model = AppModel(collector: ClusterCollector(), readOnlyLedgers: true, ledgerDirectory: previewDataDir())
         if let demoCount {

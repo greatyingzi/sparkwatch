@@ -176,6 +176,16 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 上一次真正落到 UI 的样本戳（各节点 `updatedAt` 的最大值——它只在运行时
+    /// 真正落了新样本/状态翻转时前进）与暂停态。
+    ///
+    /// 刷新定时器是 1 s 一拍，样本节奏却是 `pollSeconds`（默认 2 s）。不设闸的话，
+    /// 每个样本的镜像聚合、状态栏、整个主窗重渲染都要做**两遍**，第二遍用的还是
+    /// 同一份缓存数据——滚动时每秒被冻结一下、拖十字线时每秒顿一下
+    /// （主人报「滚动卡顿、十字线迟滞」的主因），还把火花线 ring 按 1 Hz 重复采样。
+    private var lastAppliedSampleStamp: Date?
+    private var lastAppliedPaused = false
+
     func refresh() async {
         if demoNodes != nil { return }   // synthetic fleet: nothing to poll
         // Topology changes only when a deployment starts or stops, which the
@@ -186,11 +196,19 @@ final class AppModel: ObservableObject {
         // and waiting the full interval just delays the task banner for no
         // reason (the topology is derived from cached process tables, so an
         // extra pass is nearly free).
+        var tasksRefreshed = false
         if tasks.isEmpty || Date().timeIntervalSince(lastTaskRefresh) >= 15 {
             lastTaskRefresh = Date()
             tasks = await collector.refreshClusterTasks()
+            tasksRefreshed = true
         }
         let snapshots = await collector.snapshots()
+        // **样本闸门**：样本没推进、拓扑没刷新、暂停态没变 → 本拍没有任何新信息，
+        // 定时器空转近乎零成本。登录/改名这类动作最多晚一个样本周期（≤ pollSeconds）出现。
+        let stamp = snapshots.map { $0.updatedAt }.max()
+        if !tasksRefreshed, stamp == lastAppliedSampleStamp, isPaused == lastAppliedPaused { return }
+        lastAppliedSampleStamp = stamp
+        lastAppliedPaused = isPaused
         nodes = snapshots
         lastUpdate = Date()
         // Feed the time series from what the collector already produced — no extra

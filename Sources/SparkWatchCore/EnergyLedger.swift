@@ -183,20 +183,25 @@ public struct EnergyLedger: Sendable, Codable {
     public func hourlyWatts(hours: Int, now: Date) -> [Double?] {
         guard hours > 0 else { return [] }
         let currentHourStart = floor(now.timeIntervalSince1970 / 3600) * 3600
+        // **单趟槽位归并**：分钟桶键整除 60 = UTC 整点，减窗口首小时即槽位。
+        // 旧实现每个输出小时都把全部桶 `sorted` + 全扫一遍——24 小时窗口对 4 万多
+        // 只分钟桶做 24 次排序级扫描，sample 实测 ≈ 34 ms/次，是滚动/拖十字线
+        // 每样本顿一下的主因（minuteWatts 注释里"hourlyWatts 的教训"指的就是它，
+        // 当时只修了 minuteWatts 没修本体）。一趟 O(桶数)，语义不变：
+        // 桶归其所属 UTC 整点小时槽，窗口外桶跳过。
+        var wh = [Double](repeating: 0, count: hours)
+        var coveredMs = [Double](repeating: 0, count: hours)
+        let firstHour = Int(currentHourStart / 3600) - (hours - 1)
+        for (key, bucket) in buckets {
+            let index = key / 60 - firstHour
+            if index >= 0, index < hours {
+                wh[index] += bucket.wh
+                coveredMs[index] += bucket.coveredMs
+            }
+        }
         var out = [Double?](repeating: nil, count: hours)
         for index in 0..<hours {
-            let start = currentHourStart - Double(hours - 1 - index) * 3600
-            let end = start + 3600
-            var wh = 0.0
-            var coveredMs = 0.0
-            for (key, bucket) in buckets.sorted(by: { $0.key < $1.key }) {
-                let at = Double(key) * 60
-                if at >= start, at < end {
-                    wh += bucket.wh
-                    coveredMs += bucket.coveredMs
-                }
-            }
-            out[index] = coveredMs > 0 ? wh * 3_600_000 / coveredMs : nil
+            out[index] = coveredMs[index] > 0 ? wh[index] * 3_600_000 / coveredMs[index] : nil
         }
         return out
     }

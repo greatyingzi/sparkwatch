@@ -128,7 +128,9 @@ public enum InferenceRateResolver {
             if let engineRate, engineRate > 0.5, engineRate.isFinite {
                 return RateResolution(tps: engineRate, source: "engine", counterStale: false)
             }
-            return RateResolution(tps: nil, source: "boundary", counterStale: false)
+            // Busy with a live source but nothing moved this cycle: the counter is
+            // stale (grey it), not silently absent.
+            return RateResolution(tps: nil, source: "boundary", counterStale: nativeBusy)
         }
         if let wallRate, wallRate > 0.5, wallRate.isFinite {
             return RateResolution(tps: wallRate, source: "counter", counterStale: false)

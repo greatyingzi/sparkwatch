@@ -110,6 +110,23 @@ struct EngineProbeTests {
         #expect(sample.decodeTPS == nil)
     }
 
+
+    /// Ollama installed but idle (nothing in /api/ps) is not the node's
+    /// engine: a Spark that only runs a tensor-parallel rank still has the old
+    /// Ollama on it, and calling that node Ollama · qwen2.5:0.5b is a lie the
+    /// panel used to tell. The probe must come back with no engine at all.
+    @Test func idleOllamaClaimsNoEngine() async throws {
+        let transport = FakeTransport(responses: [
+            "": ("ok", 200),
+            "metrics": ("{\"error\":\"not found\"}", 404),
+            "api/ps": ("{\"models\":[]}", 200),
+        ])
+        let sample = try await InferenceProbe(transport: transport).probe(baseURL: "http://box:11434")
+        #expect(sample.engine == nil)
+        #expect(sample.model == nil)
+        #expect(sample.loadedModels == nil)
+    }
+
     @Test func detectsLmStudioModelState() async throws {
         let models = #"{"data":[{"id":"qwen3.5-2b-mlx","object":"model","type":"vlm","arch":"qwen3_5","compatibility_type":"mlx","quantization":"4bit","state":"loaded","max_context_length":262144}]}"#
         let transport = FakeTransport(responses: [

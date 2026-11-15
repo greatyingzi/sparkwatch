@@ -195,6 +195,18 @@ public struct InferenceProbe: Sendable {
         if let ollama = try await fetchJSON(base: base, path: "api/ps"),
             let models = ollama["models"] as? [[String: Any]]
         {
+            // An installed-but-idle Ollama serves nothing, so it is not this
+            // node's engine. Claiming it made a tensor-parallel worker (a Spark
+            // that only runs a rank, and happens to have Ollama installed from
+            // months ago) show up in the panel as "Ollama · qwen2.5:0.5b".
+            // Report an endpoint with no engine instead; the panel then says
+            // nothing about an engine rather than something false.
+            guard !models.isEmpty else {
+                var idle = InferenceSample()
+                idle.endpoint = base.absoluteString
+                idle.capabilities = .init()
+                return idle
+            }
             var sample = InferenceSample()
             sample.engine = EngineKind.ollama.label
             sample.endpoint = base.absoluteString

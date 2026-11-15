@@ -532,9 +532,9 @@ struct MachinePanels: View {
     private func tiles(_ inference: InferenceSample) -> [Tile] {
         var out: [Tile] = []
         if let kv = inference.kvUsagePct {
-            out.append(Tile(label: "KV 池占用", value: String(format: "%.0f%%", kv),
+            out.append(Tile(label: "最满流上下文", value: String(format: "%.0f%%", kv),
                             tint: palette.kv(kv),
-                            help: "共享池占用 = 1 − pool_free/pool_tokens。注意另一个同名的指标是单流上下文填充率（空闲时为 0），不是容量"))
+                            help: "每条流自己的 cache ÷ 它的上下文窗口，取最满的一条——不是共享池占用。该引擎版本不导出池页数，所以这里没有 5.2M token 池的读数"))
         }
         if let running = inference.running {
             out.append(Tile(label: "运行 / 等待",

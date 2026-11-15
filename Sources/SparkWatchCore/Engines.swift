@@ -334,6 +334,15 @@ public struct InferenceProbe: Sendable {
         sample.waiting = snapshot.queuedRequests
         sample.runningTokens = snapshot.generationTokensRunning
         sample.promptTokens = snapshot.promptTokens
+        // Cache hits travel with the prompt counter they describe. Without this
+        // copy the metrics path left `cachedTokens` nil, the ledger stored 0,
+        // and every hit-rate surface showed 0 % on a working cache.
+        if let cached = snapshot.cachedTokens {
+            sample.cachedTokens = cached
+            if snapshot.promptTokens > 0 {
+                sample.cacheHitPct = min(cached / snapshot.promptTokens * 100, 100)
+            }
+        }
         sample.generationTokens = snapshot.generationTokens
         // The engine's own decode clock — the denominator that cannot be diluted
         // by idle time. Without this copy the field existed but was always nil,

@@ -39,6 +39,15 @@ public struct PrometheusSnapshot: Sendable, Equatable {
     /// is not diluted by the time nothing was decoding.
     public var decodeSeconds: Double = 0
     public var promptTokens: Double = 0
+    /// Prompt tokens served from kept prompt states instead of being recomputed.
+    /// Spelled `tensorfold:prompt_tokens_cached_total` on the 2026-11 engine,
+    /// `tensorfold:prefix_cache_hits_total` beside it, and
+    /// `tensorfold_health:cached_tokens_total` on the older build.
+    ///
+    /// Optional on purpose: an engine without the counter must read "unavailable",
+    /// not "0 % hit". Leaving it nil is what made the ledger record `cached: 0`
+    /// for every hour of a workload that was reusing 90 % of its prompts.
+    public var cachedTokens: Double?
     public var processedRequests: Double = 0
     public var activeRequests: Double = 0
     public var queuedRequests: Double = 0
@@ -77,6 +86,10 @@ public enum PrometheusParser {
         var values: [String: Double] = [:]
         var models = Set<String>()
         var families: Set<String> = []
+        /// `tensorfold:kv_cache_usage_ratio` one series per stream. They must not be
+        /// summed: each is that stream's fill of its *own* context window, so two
+        /// half-full lanes would read as 100 % "pool occupancy".
+        var kvSeries: [String: Double] = [:]
         // Histograms are summed per `le` across label sets (a metric split by
         // `engine`/`tp_rank` has several bucket series per boundary, and taking only
         // the first would compute a quantile over a fraction of the requests).
@@ -98,6 +111,7 @@ public enum PrometheusParser {
 
             families.insert(family)
             values[metricName, default: 0] += value
+            if metricName == "tensorfold:kv_cache_usage_ratio" { kvSeries[descriptor] = value }
 
             if metricName.hasSuffix("_bucket"),
                 let raw = label(named: "le", in: descriptor)
@@ -132,6 +146,10 @@ public enum PrometheusParser {
             snapshot.decodeSeconds = values[prefix + "request_decode_time_seconds_sum"] ?? 0
             snapshot.promptTokens = values[prefix + "prompt_tokens_total"]
                 ?? values[prefix + "prompt_tokens"] ?? 0
+            // vLLM names the prefix-cache hit counter; SGLang reports the same
+            // quantity as `cached_tokens_total`.
+            snapshot.cachedTokens = values[prefix + "prefix_cache_hits_total"]
+                ?? values[prefix + "cached_tokens_total"]
             if engineFamily == "sglang" {
                 snapshot.processedRequests = values["sglang:num_requests_total"] ?? 0
                 snapshot.activeRequests = values["sglang:num_running_reqs"] ?? 0
@@ -189,6 +207,13 @@ public enum PrometheusParser {
             snapshot.promptTokens = values["tensorfold:prompt_tokens_total"]
                 ?? values["tensorfold_health:prompt_tokens_total"]
                 ?? values["tensorfold_prompt_tokens_total"] ?? 0
+            // Same three build generations as the prompt counter. The Zig build
+            // (1.1.9, `TENSORFOLD_NO_LIVE=1`) publishes the cached counter here
+            // and nowhere else, so omitting it made a 90 %-hit engine read 0 %.
+            snapshot.cachedTokens = values["tensorfold:prompt_tokens_cached_total"]
+                ?? values["tensorfold:prefix_cache_hits_total"]
+                ?? values["tensorfold_health:cached_tokens_total"]
+                ?? values["tensorfold_prompt_tokens_cached_total"]
             // The one family member that is live rather than boundary-published.
             snapshot.generationTokensRunning = values["tensorfold:generation_tokens_running"]
             snapshot.processedRequests = values["tensorfold_health:requests_total"]
@@ -201,7 +226,11 @@ public enum PrometheusParser {
             snapshot.queuedRequests = values["tensorfold:requests_waiting"]
                 ?? values["tensorfold:num_requests_waiting"] ?? 0
             // Ratio with a `pool` label (summed across pools by the accumulator).
-            snapshot.kvUsagePct = values["tensorfold:kv_cache_usage_ratio"]
+            // One series per stream, each against its own 1M window. The widest
+            // stream is the honest number; summing (the accumulator's default)
+            // turned two lanes into "38 % pool occupancy" on a pool that was 7 %
+            // used, and eight lanes into 400 %. This build exports no pool gauge.
+            snapshot.kvUsagePct = kvSeries.values.max()
                 .map { $0 <= 1 ? $0 * 100 : $0 }
             // The new build names spec-decode acceptance after MTP.
             if let accepted = values["tensorfold:mtp_accepted_total"],

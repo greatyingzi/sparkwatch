@@ -296,6 +296,52 @@ struct TensorFoldTests {
         #expect(TaskSummary.ageSuffix(sample) == "")
     }
 
+    /// The metrics path must carry the cache-hit counter too.
+    ///
+    /// Measured 2026-11-15 on the Zig build (1.1.9): `/health` is
+    /// `{"status":"ok"}` because `TENSORFOLD_NO_LIVE=1`, so every number comes
+    /// from `/metrics` — and this parser dropped `prompt_tokens_cached_total`.
+    /// The ledger then stored `cached: 0` for 45 h (454 M prompt tokens) while
+    /// the engine log printed `cached=114688` of `prompt=115215` on nearly every
+    /// turn. A missing branch here reads as "nothing was ever reused".
+    @Test func metricsPathCarriesPromptCacheHits() throws {
+        let text = """
+        tensorfold:requests_running 1
+        tensorfold:prompt_tokens_total 454197850
+        tensorfold:prompt_tokens_cached_total 382623744
+        tensorfold:prefix_cache_hits_total 382623744
+        tensorfold:generation_tokens_total 2329243
+        """
+        let snapshot = try #require(PrometheusParser.parse(text))
+        #expect(snapshot.promptTokens == 454_197_850)
+        #expect(snapshot.cachedTokens == 382_623_744)
+
+        // The older build spells it in the `tensorfold_health:` namespace; the
+        // same parser must read either generation rather than return nil.
+        let old = """
+        tensorfold:prompt_tokens_total 1084251
+        tensorfold_health:cached_tokens_total 292736
+        """
+        let oldSnapshot = try #require(PrometheusParser.parse(old))
+        #expect(oldSnapshot.cachedTokens == 292_736)
+    }
+
+    /// Two streams are two ratios, not one bigger pool.
+    ///
+    /// Measured 2026-11-15: `kv_cache_usage_ratio{pool="0"}=0.263` and
+    /// `{pool="1"}=0.121` (276k and 127k of a 1M window). The accumulator summed
+    /// the label series, so the panel read "KV 池占用 38 %" on a 5.24M-token pool
+    /// that was 7.7 % used (and eight lanes would read 400 %). The widest stream
+    /// is the honest number; this build exports no pool gauge at all.
+    @Test func streamRatiosAreNotSummed() throws {
+        let text = """
+        tensorfold:kv_cache_usage_ratio{pool="0"} 0.26
+        tensorfold:kv_cache_usage_ratio{pool="1"} 0.12
+        """
+        let snapshot = try #require(PrometheusParser.parse(text))
+        #expect(abs((snapshot.kvUsagePct ?? 0) - 26) < 0.1)
+    }
+
     // MARK: - Rate semantics
 
     /// Prefill speed has to come from the engine's own accounting.
